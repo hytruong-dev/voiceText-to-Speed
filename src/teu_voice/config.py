@@ -41,7 +41,12 @@ class Settings:
     output_dir: Path = _WRITABLE_ROOT / "outputs"
     cache_dir: Path = _WRITABLE_ROOT / ".cache"
     default_reference: Path = _WRITABLE_ROOT / "data" / "voice_reference.wav"
-    precision: str = os.getenv("TEU_VOICE_PRECISION", "fp32").lower()
+    # On Vercel use int8 by default (onnx_int8 is ~157MB vs onnx_update ~453MB).
+    # This keeps model download within Vercel's /tmp limit (~512MB).
+    precision: str = os.getenv(
+        "TEU_VOICE_PRECISION",
+        "int8" if _IS_SERVERLESS else "fp32",
+    ).lower()
     host: str = os.getenv("TEU_VOICE_HOST", "127.0.0.1")
     access_key: str | None = os.getenv("TEU_VOICE_ACCESS_KEY") or None
     ngrok_host: str | None = os.getenv("TEU_VOICE_NGROK_HOST") or None
@@ -60,9 +65,17 @@ class Settings:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("HF_HOME", str(self.cache_dir / "huggingface"))
+        # On serverless (Vercel), force HF Hub to use /tmp so it has write access.
+        # Use a flat path directly in /tmp/teu_voice/.cache to avoid sub-dir creation
+        # issues; the path must be writable for HF to store downloaded model chunks.
+        hf_home = str(self.cache_dir / "huggingface")
+        os.environ.setdefault("HF_HOME", hf_home)
+        os.environ.setdefault("HF_HUB_CACHE", hf_home + "/hub")
         os.environ.setdefault("XDG_CACHE_HOME", str(self.cache_dir))
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        # Disable progress bars in serverless to reduce log noise
+        if _IS_SERVERLESS:
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
 settings = Settings()

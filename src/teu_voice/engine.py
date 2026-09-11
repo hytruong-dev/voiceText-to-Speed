@@ -300,11 +300,27 @@ class VieneuEngine:
             with self._load_lock:
                 if self._model is None:
                     from vieneu import Vieneu
-                    from .config import BUNDLED_MODEL_CACHE
+                    from .config import BUNDLED_MODEL_CACHE, _IS_SERVERLESS
 
+                    precision = self.settings.precision
                     kwargs: dict = {"backend": "onnx"}
-                    if self.settings.precision == "int8":
+                    if precision == "int8":
                         kwargs["precision"] = "int8"
+
+                    # On serverless (Vercel), disable denoiser to save ~40MB of /tmp.
+                    # denoiser.onnx is 40.7MB — skipping it keeps us within /tmp limits.
+                    if _IS_SERVERLESS:
+                        kwargs["denoiser"] = False
+                        print(
+                            f"⏳ Loading VieNeu-TTS v3 Turbo (ONNX/{precision.upper()}/serverless) "
+                            f"— denoiser disabled to conserve /tmp space",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"⏳ Loading VieNeu-TTS v3 Turbo (ONNX/{precision.upper()})",
+                            flush=True,
+                        )
 
                     # If the model was pre-downloaded at build time (Vercel),
                     # point vieneu directly at the bundled files to avoid
@@ -312,16 +328,24 @@ class VieneuEngine:
                     vieneu_dir = BUNDLED_MODEL_CACHE / "vieneu"
                     codec_dir = BUNDLED_MODEL_CACHE / "codec"
                     if vieneu_dir.exists():
-                        import os
+                        print(
+                            f"📦 Using bundled model cache at {BUNDLED_MODEL_CACHE}",
+                            flush=True,
+                        )
                         # Tell HF hub to use our bundled cache so it won't download
                         os.environ.setdefault(
                             "HF_HOME", str(BUNDLED_MODEL_CACHE / "hf_home")
                         )
                         # Pass local dirs directly to vieneu so it skips HF download
-                        subfolder = "onnx_int8" if self.settings.precision == "int8" else "onnx_update"
+                        subfolder = "onnx_int8" if precision == "int8" else "onnx_update"
                         kwargs["onnx_dir"] = str(vieneu_dir / subfolder)
                         if codec_dir.exists():
                             kwargs["moss_tokenizer"] = str(codec_dir)
+                    else:
+                        print(
+                            f"🌐 No bundled cache found at {vieneu_dir} — downloading from HuggingFace",
+                            flush=True,
+                        )
 
                     self._model = Vieneu(**kwargs)
                     self._redirect_reference_temp(self._model)

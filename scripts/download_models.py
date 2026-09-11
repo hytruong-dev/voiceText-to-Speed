@@ -1,9 +1,11 @@
 """
-Build-time script: pre-download VieNeu ONNX model files into the project so
-they get bundled into the Vercel deployment instead of being downloaded at
-runtime (which fails because /tmp is too small).
+Build-time script: pre-download VieNeu ONNX model files so they are bundled
+into the Vercel deployment instead of being downloaded at cold-start runtime
+(which fails because /tmp is too small on Vercel).
 
-Run automatically via [tool.vercel.scripts] build in pyproject.toml.
+Vercel calls this via [tool.vercel.scripts] build in pyproject.toml.
+The script runs after dependencies are installed, so vieneu and
+huggingface_hub are available.
 """
 from __future__ import annotations
 
@@ -11,60 +13,90 @@ import os
 import sys
 from pathlib import Path
 
-# Target directory — committed into the repo so Vercel bundles it
-BUNDLE_DIR = Path(__file__).resolve().parents[1] / "model_cache"
+# Target: sits next to pyproject.toml, gets bundled into /var/task/model_cache/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BUNDLE_DIR = PROJECT_ROOT / "model_cache"
+
+# Subfolder structure expected by engine.py
+VIENEU_DIR = BUNDLE_DIR / "vieneu"
+CODEC_DIR = BUNDLE_DIR / "codec"
+
+
+def _try_import_hf():
+    """Try to import huggingface_hub from installed packages or vendor path."""
+    try:
+        from huggingface_hub import hf_hub_download
+        return hf_hub_download
+    except ImportError:
+        pass
+    # Vercel bundles packages into _vendor/
+    vendor = Path("/var/task/_vendor")
+    if vendor.exists():
+        sys.path.insert(0, str(vendor))
+        try:
+            from huggingface_hub import hf_hub_download
+            return hf_hub_download
+        except ImportError:
+            pass
+    return None
 
 
 def download():
-    try:
-        from huggingface_hub import snapshot_download, hf_hub_download
-    except ImportError:
-        print("[download_models] huggingface_hub not available, skipping.", flush=True)
+    hf_hub_download = _try_import_hf()
+    if hf_hub_download is None:
+        print("[download_models] ERROR: huggingface_hub not found. Skipping.", flush=True)
         return
 
-    hf_token = os.getenv("HF_TOKEN")  # optional, raises rate limits
-
+    hf_token = os.getenv("HF_TOKEN")
     common_kwargs: dict = {}
     if hf_token:
         common_kwargs["token"] = hf_token
+        print("[download_models] Using HF_TOKEN for authenticated downloads.", flush=True)
+    else:
+        print("[download_models] WARNING: No HF_TOKEN set. Using unauthenticated (rate-limited).", flush=True)
 
     BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
-    os.environ["HF_HOME"] = str(BUNDLE_DIR / "hf_home")
+    VIENEU_DIR.mkdir(parents=True, exist_ok=True)
+    CODEC_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"[download_models] Downloading models into {BUNDLE_DIR} ...", flush=True)
+    print(f"[download_models] Target directory: {BUNDLE_DIR}", flush=True)
 
-    # ── VieNeu-TTS v3 Turbo (ONNX) ──────────────────────────────────────────
-    vieneu_files = [
-        "onnx_update/config.json",
-        "onnx_update/tokenizer.json",
-        "onnx_update/vieneu_prefill.onnx",
-        "onnx_update/vieneu_decode_step.onnx",
-        "onnx_update/vieneu_acoustic_cached.onnx",
-        "onnx_update/vieneu_backbone_shared.data",
-        "onnx_update/vieneu_v3_heads.npz",
-        "config.json",
-        "speaker_encoder.onnx",
-        # denoiser skipped — not used in builtin-voice mode on Vercel
+    # ── VieNeu-TTS v3 Turbo (ONNX fp32 subfolder) ───────────────────────────
+    vieneu_onnx_dir = VIENEU_DIR / "onnx_update"
+    vieneu_onnx_dir.mkdir(parents=True, exist_ok=True)
+
+    vieneu_onnx_files = [
+        ("onnx_update/config.json",                    vieneu_onnx_dir / "config.json"),
+        ("onnx_update/tokenizer.json",                 vieneu_onnx_dir / "tokenizer.json"),
+        ("onnx_update/vieneu_prefill.onnx",            vieneu_onnx_dir / "vieneu_prefill.onnx"),
+        ("onnx_update/vieneu_decode_step.onnx",        vieneu_onnx_dir / "vieneu_decode_step.onnx"),
+        ("onnx_update/vieneu_acoustic_cached.onnx",    vieneu_onnx_dir / "vieneu_acoustic_cached.onnx"),
+        ("onnx_update/vieneu_backbone_shared.data",    vieneu_onnx_dir / "vieneu_backbone_shared.data"),
+        ("onnx_update/vieneu_v3_heads.npz",            vieneu_onnx_dir / "vieneu_v3_heads.npz"),
     ]
-    vieneu_dir = BUNDLE_DIR / "vieneu"
-    vieneu_dir.mkdir(parents=True, exist_ok=True)
-    for fname in vieneu_files:
-        dest = vieneu_dir / fname
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            print(f"  [skip] {fname}", flush=True)
+    vieneu_root_files = [
+        ("config.json",          VIENEU_DIR / "config.json"),
+        ("speaker_encoder.onnx", VIENEU_DIR / "speaker_encoder.onnx"),
+    ]
+
+    for hf_path, dest in vieneu_onnx_files + vieneu_root_files:
+        if dest.exists() and dest.stat().st_size > 0:
+            print(f"  [skip] {hf_path} ({dest.stat().st_size // 1024}KB cached)", flush=True)
             continue
-        print(f"  [dl]   {fname}", flush=True)
+        print(f"  [dl]   {hf_path} ...", flush=True)
         try:
-            path = hf_hub_download(
+            # Download directly to dest to avoid HF cache temp dir overhead
+            subfolder = "onnx_update" if hf_path.startswith("onnx_update/") else None
+            filename = hf_path.split("/")[-1]
+            hf_hub_download(
                 repo_id="pnnbao-ump/VieNeu-TTS-v3-Turbo",
-                filename=fname,
-                local_dir=str(vieneu_dir),
+                filename=hf_path,
+                local_dir=str(VIENEU_DIR),
                 **common_kwargs,
             )
-            print(f"  [ok]   {path}", flush=True)
+            print(f"  [ok]   {hf_path}", flush=True)
         except Exception as e:
-            print(f"  [ERR]  {fname}: {e}", flush=True)
+            print(f"  [ERR]  {hf_path}: {e}", flush=True)
             sys.exit(1)
 
     # ── MOSS Audio Tokenizer (codec) ─────────────────────────────────────────
@@ -76,27 +108,29 @@ def download():
         "moss_audio_tokenizer_encode.onnx",
         "moss_audio_tokenizer_encode.data",
     ]
-    codec_dir = BUNDLE_DIR / "codec"
-    codec_dir.mkdir(parents=True, exist_ok=True)
     for fname in codec_files:
-        dest = codec_dir / fname
-        if dest.exists():
-            print(f"  [skip] {fname}", flush=True)
+        dest = CODEC_DIR / fname
+        if dest.exists() and dest.stat().st_size > 0:
+            print(f"  [skip] {fname} ({dest.stat().st_size // 1024}KB cached)", flush=True)
             continue
-        print(f"  [dl]   {fname}", flush=True)
+        print(f"  [dl]   {fname} ...", flush=True)
         try:
-            path = hf_hub_download(
+            hf_hub_download(
                 repo_id="OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX",
                 filename=fname,
-                local_dir=str(codec_dir),
+                local_dir=str(CODEC_DIR),
                 **common_kwargs,
             )
-            print(f"  [ok]   {path}", flush=True)
+            print(f"  [ok]   {fname}", flush=True)
         except Exception as e:
             print(f"  [ERR]  {fname}: {e}", flush=True)
             sys.exit(1)
 
-    print("[download_models] Done.", flush=True)
+    # Verify total size
+    total = sum(
+        f.stat().st_size for f in BUNDLE_DIR.rglob("*") if f.is_file()
+    )
+    print(f"[download_models] Done. Total model cache: {total // 1024 // 1024}MB", flush=True)
 
 
 if __name__ == "__main__":
