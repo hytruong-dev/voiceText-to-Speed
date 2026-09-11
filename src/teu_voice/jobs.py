@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -12,8 +14,15 @@ from .audio import inspect_wav
 from .emotions import EmotionSegment, natural_render_group_count
 from .engine import SpeechEngine
 
-
 logger = logging.getLogger("teu_voice.jobs")
+
+# ---------------------------------------------------------------------------
+# Detect serverless environment (Vercel). On serverless, /tmp is the only
+# writable directory and background threads do NOT outlive the HTTP response.
+# We therefore run synthesis synchronously and persist state to JSON files so
+# every function instance can read it.
+# ---------------------------------------------------------------------------
+_IS_SERVERLESS = os.getenv("VERCEL") == "1"
 
 
 class JobQueueFull(RuntimeError):
@@ -59,6 +68,49 @@ class SynthesisJob:
         return payload
 
 
+# ---------------------------------------------------------------------------
+# File-based persistence helpers (used in serverless mode)
+# ---------------------------------------------------------------------------
+
+def _job_state_dir(output_dir: Path) -> Path:
+    """Directory where JSON job snapshots are stored."""
+    state_dir = output_dir / ".job_states"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir
+
+
+def _job_state_path(output_dir: Path, job_id: str) -> Path:
+    return _job_state_dir(output_dir) / f"{job_id}.json"
+
+
+def _save_job_state(output_dir: Path, job: SynthesisJob) -> None:
+    """Persist a job's public state to a JSON file."""
+    data = job.public_dict()
+    # Include fields needed to reconstruct status checks
+    data["status"] = job.status
+    data["stage"] = job.stage
+    data["error"] = job.error
+    path = _job_state_path(output_dir, job.id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _load_job_state(output_dir: Path, job_id: str) -> dict[str, object] | None:
+    """Load a job's state from its JSON file, or None if not found."""
+    path = _job_state_path(output_dir, job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# JobManager
+# ---------------------------------------------------------------------------
+
 class JobManager:
     def __init__(
         self,
@@ -72,11 +124,16 @@ class JobManager:
         self.output_dir = output_dir
         self.max_pending_jobs = max_pending_jobs
         self.max_retained_jobs = max_retained_jobs
+        # In-memory store (used in both modes; serverless additionally writes to disk)
         self._jobs: dict[str, SynthesisJob] = {}
         self._futures: dict[str, Future[None]] = {}
         self._lock = threading.Lock()
         self._closed = False
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teu-voice")
+        # Only used in local (non-serverless) mode
+        self._executor = (
+            None if _IS_SERVERLESS
+            else ThreadPoolExecutor(max_workers=1, thread_name_prefix="teu-voice")
+        )
 
     def submit(
         self,
@@ -108,30 +165,46 @@ class JobManager:
             style_transfer=style_transfer,
             cleanup_reference=cleanup_reference,
         )
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("Hàng đợi đã đóng.")
-            active = sum(
-                job.status in {"queued", "running"} for job in self._jobs.values()
-            )
-            if active >= self.max_pending_jobs:
-                raise JobQueueFull(
-                    "Hàng đợi local đang đầy. Vui lòng chờ một lượt hoàn tất."
-                )
-            self._evict_completed_locked()
+
+        if _IS_SERVERLESS:
+            # On serverless: run synthesis synchronously within this request.
+            # The response is held open until synthesis completes.
             self._jobs[job_id] = job
-            future = self._executor.submit(self._run, job_id)
-            self._futures[job_id] = future
-        return job
+            self._run(job_id)
+        else:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("Hàng đợi đã đóng.")
+                active = sum(
+                    j.status in {"queued", "running"} for j in self._jobs.values()
+                )
+                if active >= self.max_pending_jobs:
+                    raise JobQueueFull(
+                        "Hàng đợi local đang đầy. Vui lòng chờ một lượt hoàn tất."
+                    )
+                self._evict_completed_locked()
+                self._jobs[job_id] = job
+                future = self._executor.submit(self._run, job_id)
+                self._futures[job_id] = future
+
+        return self._jobs[job_id]
 
     def get(self, job_id: str) -> SynthesisJob | None:
         with self._lock:
             return self._jobs.get(job_id)
 
     def get_public(self, job_id: str) -> dict[str, object] | None:
+        # Try in-memory first
         with self._lock:
             job = self._jobs.get(job_id)
-            return None if job is None else job.public_dict()
+            if job is not None:
+                return job.public_dict()
+
+        # In serverless mode, fall back to file-based state
+        if _IS_SERVERLESS:
+            return _load_job_state(self.output_dir, job_id)
+
+        return None
 
     def _evict_completed_locked(self) -> None:
         overflow = len(self._jobs) - self.max_retained_jobs + 1
@@ -151,10 +224,13 @@ class JobManager:
             job = self._jobs[job_id]
             for key, value in changes.items():
                 setattr(job, key, value)
+            # Persist to disk in serverless mode so other instances can read it
+            if _IS_SERVERLESS:
+                _save_job_state(self.output_dir, job)
             return job
 
     def _run(self, job_id: str) -> None:
-        job = self.get(job_id)
+        job = self.get(job_id) or self._jobs.get(job_id)
         if job is None:
             return
         output_name = f"teu-voice-{job_id[:12]}.wav"
@@ -200,13 +276,15 @@ class JobManager:
                 job_id,
                 status="error",
                 stage="Không thể tạo giọng",
-                error="Engine local gặp lỗi khi tạo giọng. Chi tiết đã được ghi ở terminal.",
+                error="Engine gặp lỗi khi tạo giọng. Vui lòng thử lại.",
             )
         finally:
             if job.cleanup_reference and job.reference_path is not None:
                 job.reference_path.unlink(missing_ok=True)
 
     def close(self) -> None:
+        if _IS_SERVERLESS:
+            return
         cleanup_paths: list[Path] = []
         with self._lock:
             self._closed = True
@@ -222,4 +300,5 @@ class JobManager:
                         cleanup_paths.append(job.reference_path)
         for path in cleanup_paths:
             path.unlink(missing_ok=True)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        if self._executor:
+            self._executor.shutdown(wait=False, cancel_futures=True)
