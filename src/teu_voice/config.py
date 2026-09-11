@@ -15,6 +15,10 @@ _SERVERLESS_TMP = Path("/tmp/teu_voice")
 _IS_SERVERLESS = os.getenv("VERCEL") == "1" or not os.access(PROJECT_ROOT, os.W_OK)
 _WRITABLE_ROOT = _SERVERLESS_TMP if _IS_SERVERLESS else PROJECT_ROOT
 
+# Pre-downloaded model cache bundled at build time (lives in project root).
+# On Vercel this is read-only but already present in /var/task/model_cache/.
+BUNDLED_MODEL_CACHE = PROJECT_ROOT / "model_cache"
+
 
 def is_loopback_host(host: str) -> bool:
     return host.lower().rstrip(".") in LOOPBACK_HOSTS

@@ -300,10 +300,29 @@ class VieneuEngine:
             with self._load_lock:
                 if self._model is None:
                     from vieneu import Vieneu
+                    from .config import BUNDLED_MODEL_CACHE
 
-                    kwargs: dict[str, str] = {"backend": "onnx"}
+                    kwargs: dict = {"backend": "onnx"}
                     if self.settings.precision == "int8":
                         kwargs["precision"] = "int8"
+
+                    # If the model was pre-downloaded at build time (Vercel),
+                    # point vieneu directly at the bundled files to avoid
+                    # re-downloading into /tmp (which is too small).
+                    vieneu_dir = BUNDLED_MODEL_CACHE / "vieneu"
+                    codec_dir = BUNDLED_MODEL_CACHE / "codec"
+                    if vieneu_dir.exists():
+                        import os
+                        # Tell HF hub to use our bundled cache so it won't download
+                        os.environ.setdefault(
+                            "HF_HOME", str(BUNDLED_MODEL_CACHE / "hf_home")
+                        )
+                        # Pass local dirs directly to vieneu so it skips HF download
+                        subfolder = "onnx_int8" if self.settings.precision == "int8" else "onnx_update"
+                        kwargs["onnx_dir"] = str(vieneu_dir / subfolder)
+                        if codec_dir.exists():
+                            kwargs["moss_tokenizer"] = str(codec_dir)
+
                     self._model = Vieneu(**kwargs)
                     self._redirect_reference_temp(self._model)
         return self._model

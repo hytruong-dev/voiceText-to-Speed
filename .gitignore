@@ -5,6 +5,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+# model_cache is downloaded at Vercel build time — NOT committed to git
+# (too large; built by scripts/download_models.py)
+model_cache/
 
 # Voice references are biometric data: keep them local by default.
 data/*

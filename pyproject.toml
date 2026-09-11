@@ -35,6 +35,9 @@ packages = ["src/teu_voice"]
 [tool.vercel]
 entrypoint = "src.teu_voice.app:app"
 
+[tool.vercel.scripts]
+build = "python scripts/download_models.py"
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
