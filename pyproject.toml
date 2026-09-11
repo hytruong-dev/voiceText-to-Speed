@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "teu-voice"
+version = "0.3.3"
+description = "Vietnamese expressive text-to-speech studio with local voice cloning"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Tếu Voice Studio" }]
+dependencies = [
+  "fastapi>=0.116,<1",
+  "librosa>=0.11,<2",
+  "numpy>=2.0,<3",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn>=0.35,<1",
+  "vieneu==3.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<10",
+]
+
+[project.scripts]
+teu-voice = "teu_voice.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/teu_voice"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/teu_voice/static" = "teu_voice/static"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

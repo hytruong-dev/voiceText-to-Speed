@@ -1,0 +1,17 @@
+.venv/
+.cache/
+.tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Voice references are biometric data: keep them local by default.
+data/*
+!data/.gitkeep
+
+# Generated speech stays local.
+outputs/*
+!outputs/.gitkeep
+
+

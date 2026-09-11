@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Studio text-to-speech tiếng Việt có biểu cảm, chạy local." />
+    <title>Tếu Voice Studio</title>
+    <link rel="stylesheet" href="/static/styles.css?v=0.3.3" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="topbar shell">
+      <a class="brand" href="/" aria-label="Tếu Voice Studio">
+        <span class="brand-mark" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i>
+        </span>
+        <span>
+          <strong>Tếu Voice</strong>
+          <small>STUDIO</small>
+        </span>
+      </a>
+      <div class="privacy-pill"><span></span> Local &amp; riêng tư</div>
+    </header>
+
+    <main class="shell studio-grid">
+      <section class="intro">
+        <p class="eyebrow">Vietnamese expressive TTS</p>
+        <h1>Cho câu chữ một<br /><em>cái duyên.</em></h1>
+        <p class="lead">
+          Clone màu giọng từ mẫu của bạn, đặt nhịp punchline và thêm tiếng cười—ngay trên máy này.
+        </p>
+      </section>
+
+      <section class="panel composer" aria-labelledby="composer-title">
+        <div class="panel-heading">
+          <div>
+            <span class="step">01</span>
+            <h2 id="composer-title">Nội dung</h2>
+          </div>
+          <span id="char-count" class="counter">0 / 2.000</span>
+        </div>
+
+        <label class="sr-only" for="script">Nội dung cần đọc và tag cảm xúc</label>
+        <div class="script-editor">
+          <textarea
+            id="script"
+            maxlength="2000"
+            spellcheck="true"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded="false"
+            aria-controls="tag-suggestions"
+            aria-haspopup="listbox"
+          >@hài_hước Người ta bảo tôi phải sống thật với chính mình.
+@tỉnh_bơ Thế là sáng nay tôi ngủ thêm hai tiếng—vì chính mình cũng chưa muốn dậy. @cười_khẽ Hê hê!</textarea>
+          <div id="tag-suggestions" class="tag-suggestions" role="listbox" aria-label="Gợi ý tag cảm xúc" hidden></div>
+        </div>
+        <div class="editor-guide">
+          <span><kbd>@</kbd> gợi ý cảm xúc</span>
+          <span><kbd>↑</kbd><kbd>↓</kbd> chọn · <kbd>Enter</kbd> chèn · <kbd>Esc</kbd> đóng</span>
+        </div>
+
+        <div class="section-block">
+          <div class="section-title">
+            <div><span class="step">02</span><h2>Tag cảm xúc</h2></div>
+            <span id="tag-count-label" class="micro-copy">Đang tải thư viện…</span>
+          </div>
+          <p class="tag-help">Chèn tag trước đoạn muốn diễn. Tag tự kết thúc khi gặp tag kế tiếp hoặc một dòng trống.</p>
+          <div id="quick-tags" class="quick-tags" aria-label="Tag thường dùng"></div>
+          <details class="tag-library-details">
+            <summary>Xem toàn bộ thư viện <span aria-hidden="true">＋</span></summary>
+            <div id="tag-library" class="tag-library"></div>
+          </details>
+          <div class="support-key" aria-label="Chú thích mức hỗ trợ">
+            <span><i class="support-dot native"></i>Gốc</span>
+            <span><i class="support-dot hybrid"></i>Cue + biên tập</span>
+            <span><i class="support-dot deterministic"></i>Biên tập</span>
+            <span><i class="support-dot approximate"></i>Mô phỏng</span>
+          </div>
+          <div class="speed-row">
+            <label for="speed">Tốc độ toàn bài <strong id="speed-label">1,00× · Bình thường</strong></label>
+            <input id="speed" type="range" min="0.75" max="1.35" step="0.05" value="1" />
+            <div class="range-ends"><span>Chậm 0,75×</span><span>Nhanh 1,35×</span></div>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-title">
+            <div><span class="step">03</span><h2>Giọng đọc</h2></div>
+          </div>
+
+          <div class="source-tabs" role="radiogroup" aria-label="Nguồn giọng">
+            <label><input type="radio" name="voice-source" value="provided" checked /><span>Mẫu đã gửi</span></label>
+            <label><input type="radio" name="voice-source" value="microphone" /><span>Thu mic</span></label>
+            <label><input type="radio" name="voice-source" value="upload" /><span>Tải WAV khác</span></label>
+            <label><input type="radio" name="voice-source" value="builtin" /><span>Giọng dựng sẵn</span></label>
+          </div>
+
+          <div id="provided-source" class="voice-source active">
+            <div class="sample-card">
+              <div class="sample-icon">WAV</div>
+              <div class="sample-info">
+                <strong>Mẫu giọng riêng</strong>
+                <span id="reference-meta">Đang kiểm tra…</span>
+              </div>
+              <audio id="reference-player" controls preload="metadata" aria-label="Nghe mẫu giọng tham chiếu"></audio>
+            </div>
+          </div>
+
+          <div id="upload-source" class="voice-source">
+            <label class="drop-zone" for="reference-file">
+              <input id="reference-file" type="file" accept="audio/wav,.wav" />
+              <span class="drop-icon">＋</span>
+              <strong id="file-label">Chọn mẫu WAV 3–8 giây</strong>
+              <small id="upload-hint">Giọng rõ, một người nói, không nhạc nền · đang tải giới hạn…</small>
+            </label>
+          </div>
+
+          <div id="microphone-source" class="voice-source">
+            <div class="mic-capture">
+              <div>
+                <strong>Thu một câu liền mạch 6–8 giây</strong>
+                <small id="microphone-status">Đọc bằng đúng mic, khoảng cách và âm lượng bạn thường dùng. Không nhạc nền, không nén/khử ồn.</small>
+              </div>
+              <button id="microphone-button" class="button secondary" type="button">Bắt đầu thu</button>
+            </div>
+            <audio id="microphone-player" controls preload="metadata" aria-label="Nghe lại mẫu mic vừa thu" hidden></audio>
+            <p class="mic-note">Mẫu này được gửi trực tiếp vào lượt clone hiện tại rồi tự xóa. Nếu báo quá âm lượng, hãy hạ gain mic trước khi thu lại.</p>
+          </div>
+
+          <div id="builtin-source" class="voice-source">
+            <label class="select-label" for="builtin-voice">Giọng tiếng Việt dựng sẵn</label>
+            <select id="builtin-voice"></select>
+          </div>
+
+          <label id="denoise-row" class="check-row">
+            <input id="denoise" type="checkbox" />
+            <span><strong>Làm sạch mẫu trước khi clone</strong><small>Bật với file thu mới có tiếng phòng; mẫu hiện tại đã sạch nên không cần.</small></span>
+          </label>
+
+          <label id="style-transfer-row" class="check-row" hidden>
+            <input id="style-transfer" type="checkbox" />
+            <span><strong>Thử phong cách từ mẫu khác</strong><small>Mặc định tắt để ưu tiên đúng giọng bạn. Bật có thể thay đổi màu giọng; chỉ nên dùng mẫu phong cách do chính bạn thu.</small></span>
+          </label>
+
+          <label id="consent-row" class="check-row consent-row">
+            <input id="consent" type="checkbox" />
+            <span><strong>Tôi sở hữu giọng này hoặc đã được chủ giọng cho phép.</strong><small>Mẫu chỉ được xử lý local và không được commit vào Git.</small></span>
+          </label>
+        </div>
+
+        <div id="form-error" class="alert" role="alert" hidden></div>
+        <div class="actions">
+          <button id="preview-button" class="button secondary" type="button">Xem chỉ đạo</button>
+          <button id="generate-button" class="button primary" type="button" disabled>
+            <span id="generate-label">Tạo giọng nói</span><b aria-hidden="true">→</b>
+          </button>
+        </div>
+      </section>
+
+      <aside id="result-panel" class="panel result" aria-labelledby="result-title" aria-busy="false" tabindex="-1">
+        <div class="panel-heading">
+          <div><span class="step">04</span><h2 id="result-title">Bản diễn</h2></div>
+          <span id="engine-badge" class="engine-badge loading" role="status" aria-live="polite">Đang kiểm tra</span>
+        </div>
+
+        <div id="empty-result" class="empty-result">
+          <div class="orb">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <h3>Micro đang chờ</h3>
+          <p>Bản thu đầu tiên sẽ xuất hiện ở đây.</p>
+        </div>
+
+        <div id="working-result" class="working-result" role="status" aria-live="polite" hidden>
+          <div class="loader-ring"></div>
+          <p id="job-stage">Đang xếp hàng</p>
+          <small>Lần chạy đầu có thể lâu hơn vì mô hình được tải về máy.</small>
+        </div>
+
+        <div id="preview-result" class="preview-result" role="region" aria-label="Chỉ đạo cảm xúc" hidden>
+          <div class="preview-label"><span>Chỉ đạo cảm xúc</span><button id="close-preview" aria-label="Đóng">×</button></div>
+          <div id="preview-tags" class="preview-tags"></div>
+          <pre id="performance-script"></pre>
+          <p id="preview-effects" class="preview-effects"></p>
+          <div id="preview-warnings" class="preview-warnings"></div>
+        </div>
+
+        <div id="done-result" class="done-result" role="status" aria-live="polite" hidden>
+          <div class="cover-art">
+            <div class="cover-lines"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span>TẾU<br />VOICE</span>
+          </div>
+          <div class="track-info">
+            <p>BẢN THU MỚI</p>
+            <h3 id="track-title">Bản cảm xúc</h3>
+            <span id="track-meta">WAV · local</span>
+          </div>
+          <audio id="result-player" controls preload="metadata" aria-label="Nghe bản giọng vừa tạo"></audio>
+          <div class="result-actions">
+            <a id="download-link" class="button primary" download>Tải bản WAV</a>
+            <button id="show-script" class="button ghost" type="button">Xem kịch bản</button>
+          </div>
+        </div>
+
+        <div class="engine-note">
+          <span class="lock-icon">⌾</span>
+          <p><strong>VieNeu‑TTS v3 Turbo</strong><br />CPU/ONNX · 48 kHz · không gửi voice ra Internet</p>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="shell">
+      <span>Chỉ clone giọng khi có sự đồng ý.</span>
+      <span>Made for Vietnamese timing ✦</span>
+    </footer>
+
+    <script src="/static/app.js?v=identity-1" defer></script>
+  </body>
+</html>

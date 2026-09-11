@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import os
+from ipaddress import IPv4Address, ip_address
+from dataclasses import dataclass
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def is_loopback_host(host: str) -> bool:
+    return host.lower().rstrip(".") in LOOPBACK_HOSTS
+
+
+def is_private_lan_ipv4(host: str) -> bool:
+    """Allow one explicit private IPv4 address, never a wildcard bind."""
+
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    return isinstance(address, IPv4Address) and address.is_private and not address.is_loopback
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    project_root: Path = PROJECT_ROOT
+    data_dir: Path = PROJECT_ROOT / "data"
+    output_dir: Path = PROJECT_ROOT / "outputs"
+    cache_dir: Path = PROJECT_ROOT / ".cache"
+    default_reference: Path = PROJECT_ROOT / "data" / "voice_reference.wav"
+    precision: str = os.getenv("TEU_VOICE_PRECISION", "fp32").lower()
+    host: str = os.getenv("TEU_VOICE_HOST", "127.0.0.1")
+    access_key: str | None = os.getenv("TEU_VOICE_ACCESS_KEY") or None
+    ngrok_host: str | None = os.getenv("TEU_VOICE_NGROK_HOST") or None
+    max_text_chars: int = 2_000
+    max_upload_bytes: int = 20 * 1024 * 1024
+
+    @property
+    def lan_enabled(self) -> bool:
+        return is_private_lan_ipv4(self.host)
+
+    @property
+    def ngrok_enabled(self) -> bool:
+        return bool(self.ngrok_host)
+
+    def prepare(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("HF_HOME", str(self.cache_dir / "huggingface"))
+        os.environ.setdefault("XDG_CACHE_HOME", str(self.cache_dir))
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+
+settings = Settings()
