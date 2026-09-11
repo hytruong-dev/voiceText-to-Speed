@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Tếu Voice Studio" }]
 dependencies = [
   "fastapi>=0.116,<1",
+  "huggingface_hub>=0.27,<1",
   "librosa>=0.11,<2",
   "numpy>=2.0,<3",
   "python-multipart>=0.0.20,<1",

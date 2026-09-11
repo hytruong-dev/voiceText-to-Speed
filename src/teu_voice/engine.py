@@ -325,25 +325,25 @@ class VieneuEngine:
                     # If the model was pre-downloaded at build time (Vercel),
                     # point vieneu directly at the bundled files to avoid
                     # re-downloading into /tmp (which is too small).
+                    subfolder = "onnx_int8" if precision == "int8" else "onnx_update"
                     vieneu_dir = BUNDLED_MODEL_CACHE / "vieneu"
+                    vieneu_onnx_dir = vieneu_dir / subfolder
                     codec_dir = BUNDLED_MODEL_CACHE / "codec"
-                    if vieneu_dir.exists():
+                    # Check for actual model files (not just empty directories)
+                    bundled_config = vieneu_onnx_dir / "config.json"
+                    bundled_codec_meta = codec_dir / "codec_browser_onnx_meta.json"
+                    if bundled_config.exists() and bundled_config.stat().st_size > 0:
                         print(
                             f"📦 Using bundled model cache at {BUNDLED_MODEL_CACHE}",
                             flush=True,
                         )
-                        # Tell HF hub to use our bundled cache so it won't download
-                        os.environ.setdefault(
-                            "HF_HOME", str(BUNDLED_MODEL_CACHE / "hf_home")
-                        )
                         # Pass local dirs directly to vieneu so it skips HF download
-                        subfolder = "onnx_int8" if precision == "int8" else "onnx_update"
-                        kwargs["onnx_dir"] = str(vieneu_dir / subfolder)
-                        if codec_dir.exists():
+                        kwargs["onnx_dir"] = str(vieneu_onnx_dir)
+                        if bundled_codec_meta.exists():
                             kwargs["moss_tokenizer"] = str(codec_dir)
                     else:
                         print(
-                            f"🌐 No bundled cache found at {vieneu_dir} — downloading from HuggingFace",
+                            f"🌐 No bundled model files found — downloading from HuggingFace (int8={precision == 'int8'})",
                             flush=True,
                         )
 
