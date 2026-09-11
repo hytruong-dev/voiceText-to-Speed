@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "src/teu_voice/app.py": {
+      "excludeFiles": "{tests/**,scripts/**,docs/**,.cache/**,outputs/**,data/**,.venv/**,*.ps1,*.md,uv.lock,LICENSE}"
+    }
+  }
+}
