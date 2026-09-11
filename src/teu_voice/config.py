@@ -9,6 +9,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
+# On Vercel (and other serverless platforms) the project root is read-only.
+# Only /tmp is writable. Detect this and redirect mutable dirs accordingly.
+_SERVERLESS_TMP = Path("/tmp/teu_voice")
+_IS_SERVERLESS = os.getenv("VERCEL") == "1" or not os.access(PROJECT_ROOT, os.W_OK)
+_WRITABLE_ROOT = _SERVERLESS_TMP if _IS_SERVERLESS else PROJECT_ROOT
+
 
 def is_loopback_host(host: str) -> bool:
     return host.lower().rstrip(".") in LOOPBACK_HOSTS
@@ -27,10 +33,10 @@ def is_private_lan_ipv4(host: str) -> bool:
 @dataclass(frozen=True, slots=True)
 class Settings:
     project_root: Path = PROJECT_ROOT
-    data_dir: Path = PROJECT_ROOT / "data"
-    output_dir: Path = PROJECT_ROOT / "outputs"
-    cache_dir: Path = PROJECT_ROOT / ".cache"
-    default_reference: Path = PROJECT_ROOT / "data" / "voice_reference.wav"
+    data_dir: Path = _WRITABLE_ROOT / "data"
+    output_dir: Path = _WRITABLE_ROOT / "outputs"
+    cache_dir: Path = _WRITABLE_ROOT / ".cache"
+    default_reference: Path = _WRITABLE_ROOT / "data" / "voice_reference.wav"
     precision: str = os.getenv("TEU_VOICE_PRECISION", "fp32").lower()
     host: str = os.getenv("TEU_VOICE_HOST", "127.0.0.1")
     access_key: str | None = os.getenv("TEU_VOICE_ACCESS_KEY") or None

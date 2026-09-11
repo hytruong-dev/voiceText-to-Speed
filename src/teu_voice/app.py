@@ -87,6 +87,12 @@ def create_app(
             return True
         if cfg.ngrok_enabled and hostname == cfg.ngrok_host:
             return True
+        # Allow Vercel deployment domains (*.vercel.app and custom domains via VERCEL_URL)
+        if hostname.endswith(".vercel.app"):
+            return True
+        vercel_url = os.getenv("VERCEL_URL", "")
+        if vercel_url and hostname == request_hostname(vercel_url):
+            return True
         return False
 
     def has_access_key(request: Request) -> bool:
