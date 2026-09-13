@@ -272,11 +272,25 @@ class JobManager:
             temporary_output.unlink(missing_ok=True)
             output_path.unlink(missing_ok=True)
             logger.exception("Synthesis job %s failed", job_id)
+            message = str(exc).strip() or exc.__class__.__name__
+            if isinstance(exc, MemoryError) or "SIGKILL" in message:
+                message = (
+                    "Máy chủ cloud hết bộ nhớ khi dựng đoạn dài. "
+                    "Hãy rút ngắn nội dung (khoảng dưới 500 ký tự) rồi thử lại."
+                )
+            elif isinstance(exc, ValueError):
+                message = str(exc)
+            else:
+                message = (
+                    f"Engine gặp lỗi khi tạo giọng: {message[:240]}"
+                    if _IS_SERVERLESS
+                    else "Engine gặp lỗi khi tạo giọng. Vui lòng thử lại."
+                )
             self._update(
                 job_id,
                 status="error",
                 stage="Không thể tạo giọng",
-                error="Engine gặp lỗi khi tạo giọng. Vui lòng thử lại.",
+                error=message,
             )
         finally:
             if job.cleanup_reference and job.reference_path is not None:

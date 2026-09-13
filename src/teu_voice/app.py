@@ -278,7 +278,12 @@ def create_app(
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=503, detail=detail)
 
-        effective_style_transfer = bool(style_transfer and current_style_names())
+        from .config import _IS_SERVERLESS
+
+        # Style codes double reference memory; keep off on Hobby 2GB.
+        effective_style_transfer = bool(
+            style_transfer and current_style_names() and not _IS_SERVERLESS
+        )
         try:
             job = manager.submit(
                 text=normalized_text,
@@ -297,8 +302,37 @@ def create_app(
             if cleanup_reference and reference_path is not None:
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=429, detail=str(exc)) from exc
-        return manager.get_public(job.id) or job.public_dict()
+        except MemoryError as exc:
+            if cleanup_reference and reference_path is not None:
+                reference_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Máy chủ cloud hết bộ nhớ khi dựng đoạn dài. "
+                    "Hãy rút ngắn nội dung (khoảng dưới 500 ký tự) rồi thử lại."
+                ),
+            ) from exc
+        except ValueError as exc:
+            if cleanup_reference and reference_path is not None:
+                reference_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - never leak a bare 500 to the UI
+            if cleanup_reference and reference_path is not None:
+                reference_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Không tạo được giọng lúc này: {str(exc)[:240]}",
+            ) from exc
 
+        payload = manager.get_public(job.id) or job.public_dict()
+        # Serverless runs synthesis inside this request; surface failures as HTTP errors
+        # so the browser does not treat a completed-but-failed job as success.
+        if payload.get("status") == "error":
+            raise HTTPException(
+                status_code=503,
+                detail=str(payload.get("error") or "Engine gặp lỗi khi tạo giọng."),
+            )
+        return payload
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
         job = manager.get_public(job_id)

@@ -12,7 +12,7 @@ from typing import Protocol, Sequence
 import numpy as np
 
 from .audio import AudioValidationError, prepare_clone_reference
-from .config import Settings
+from .config import Settings, _IS_SERVERLESS
 from .emotions import EmotionSegment
 
 
@@ -34,7 +34,11 @@ _CLONE_TOP_K = 20
 _CLONE_TOP_P = 0.9
 _BUILTIN_TEMPERATURE = 0.8
 _PRECLEAN_TOP_DB = 24
-_INFER_MAX_CHARS = 384
+# Serverless (Hobby ~2GB) OOMs when a single ONNX decode is too long; keep chunks tiny.
+_INFER_MAX_CHARS = 96 if _IS_SERVERLESS else 384
+_SERVERLESS_MAX_GROUPS = 24
+_SERVERLESS_MAX_GROUP_CHARS = 96
+
 _STYLE_TAGS = {
     "excited": frozenset(
         {
@@ -91,6 +95,54 @@ class SpeechEngine(Protocol):
     ) -> None: ...
 
 
+def _time_stretch(audio: np.ndarray, rate: float, sample_rate: int = 48_000) -> np.ndarray:
+    """Change playback duration without librosa/STFT (STFT OOMs on Vercel 2GB).
+
+    Uses soxr resampling: slight pitch shift with speed is acceptable for TTS tags
+    and stays within serverless memory.
+    """
+
+    if abs(rate - 1.0) <= 0.001:
+        return audio
+    # rate < 1 → slower → more samples; rate > 1 → fewer samples.
+    target_rate = max(1_000, int(round(sample_rate / rate)))
+    try:
+        import soxr
+
+        return np.asarray(
+            soxr.resample(audio, sample_rate, target_rate),
+            dtype=np.float32,
+        )
+    except Exception:  # noqa: BLE001 - keep synthesis alive on slim runtimes
+        new_len = max(1, int(round(len(audio) / rate)))
+        positions = np.linspace(0, len(audio) - 1, new_len, dtype=np.float64)
+        return np.interp(positions, np.arange(len(audio)), audio).astype(np.float32)
+
+
+def _pitch_shift(audio: np.ndarray, sample_rate: int, steps: float) -> np.ndarray:
+    """Shift pitch without librosa by resampling around a soxr rate change."""
+
+    if abs(steps) <= 0.01:
+        return audio
+    import soxr
+
+    factor = float(2 ** (steps / 12.0))
+    # Raise/lower by resampling, then restore duration with time stretch.
+    shifted = np.asarray(
+        soxr.resample(audio, sample_rate, int(round(sample_rate * factor))),
+        dtype=np.float32,
+    )
+    restored = _time_stretch(shifted, rate=factor, sample_rate=sample_rate)
+    # Keep output length stable for callers that expect formant-only changes.
+    if len(restored) == len(audio):
+        return restored
+    if len(restored) > len(audio):
+        return restored[: len(audio)].copy()
+    padded = np.zeros(len(audio), dtype=np.float32)
+    padded[: len(restored)] = restored
+    return padded
+
+
 def _safe_audio_effects(
     audio: np.ndarray,
     sample_rate: int,
@@ -108,17 +160,10 @@ def _safe_audio_effects(
     original_rms = float(np.sqrt(np.mean(np.square(result, dtype=np.float64))))
     needs_spectral_dsp = abs(speed - 1.0) > 0.001 or abs(pitch_steps) > 0.01
     if needs_spectral_dsp:
-        import librosa
-
         if abs(pitch_steps) > 0.01:
-            result = librosa.effects.pitch_shift(
-                result,
-                sr=sample_rate,
-                n_steps=pitch_steps,
-                res_type="soxr_hq",
-            )
+            result = _pitch_shift(result, sample_rate, pitch_steps)
         if abs(speed - 1.0) > 0.001:
-            result = librosa.effects.time_stretch(result, rate=speed)
+            result = _time_stretch(result, speed, sample_rate=sample_rate)
         result = np.asarray(result, dtype=np.float32)
         processed_rms = float(np.sqrt(np.mean(np.square(result, dtype=np.float64))))
         if original_rms > 1e-8 and processed_rms > 1e-8:
@@ -246,6 +291,62 @@ def _group_speed_multiplier(multipliers: Sequence[float]) -> float:
     for value in multipliers:
         product *= value
     return product ** (1.0 / len(multipliers))
+
+
+def _split_text_by_limit(text: str, max_chars: int) -> list[str]:
+    """Split long prose at sentence / clause boundaries for low-memory inference."""
+
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return [cleaned] if cleaned else []
+
+    parts: list[str] = []
+    remaining = cleaned
+    while remaining:
+        if len(remaining) <= max_chars:
+            parts.append(remaining)
+            break
+        window = remaining[: max_chars + 1]
+        split_at = -1
+        for marker in (". ", "! ", "? ", "; ", ", ", " "):
+            index = window.rfind(marker)
+            if index >= max(24, max_chars // 3):
+                split_at = index + len(marker)
+                break
+        if split_at <= 0:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            parts.append(chunk)
+        remaining = remaining[split_at:].strip()
+    return parts
+
+
+def _prepare_inference_groups(
+    segments: Sequence[EmotionSegment],
+) -> tuple[_InferenceGroup, ...]:
+    """Group for delivery, then (on serverless) shatter into tiny ONNX-safe pieces."""
+
+    groups = _group_segments_for_natural_delivery(segments)
+    if not _IS_SERVERLESS:
+        return groups
+
+    shattered: list[_InferenceGroup] = []
+    for group in groups:
+        pieces = _split_text_by_limit(group.engine_text, _SERVERLESS_MAX_GROUP_CHARS)
+        if not pieces:
+            continue
+        for index, piece in enumerate(pieces):
+            shattered.append(
+                _InferenceGroup(
+                    engine_text=piece,
+                    pause_before_ms=group.pause_before_ms if index == 0 else 40,
+                    tag_ids=group.tag_ids,
+                    temperatures=group.temperatures,
+                    speed_multipliers=group.speed_multipliers,
+                )
+            )
+    return tuple(shattered)
 
 
 def _sampling_temperature(
@@ -461,6 +562,7 @@ class VieneuEngine:
             raise ValueError("Kịch bản không có đoạn nào để tổng hợp.")
         model = self._get_model()
         prepared_reference: Path | None = None
+        dump_path: Path | None = None
         with self._infer_lock:
             try:
                 speaker_emb = None
@@ -487,85 +589,112 @@ class VieneuEngine:
                 else:
                     base_voice = builtin_voice
 
-                groups = _group_segments_for_natural_delivery(segments)
-                rendered: list[np.ndarray] = []
-                for group in groups:
-                    voice = base_voice
-                    style_name = _style_for_tags(group.tag_ids) if style_transfer else None
-                    style_codes = (
-                        self._get_style_codes(model, style_name)
-                        if style_name is not None
-                        else None
+                groups = _prepare_inference_groups(segments)
+                if _IS_SERVERLESS and len(groups) > _SERVERLESS_MAX_GROUPS:
+                    raise ValueError(
+                        "Đoạn văn quá dài cho môi trường cloud (giới hạn bộ nhớ 2GB). "
+                        f"Hãy rút xuống còn khoảng {_SERVERLESS_MAX_GROUPS} câu ngắn "
+                        "(khoảng dưới 500 ký tự mỗi lượt)."
                     )
-                    if style_codes is not None:
-                        if speaker_emb is None:
-                            speaker_emb, ref_codes = model._resolve_ref(
-                                builtin_voice,
-                                None,
-                                False,
-                                True,
-                            )
-                            base_voice = {
+
+                # Stream pieces to a temp float32 dump so long scripts do not keep
+                # every chunk resident in RAM at once (Vercel OOM → SIGKILL 137).
+                dump_path = (
+                    self.settings.cache_dir / "vieneu" / "tmp" / f"{uuid.uuid4().hex}.f32"
+                )
+                dump_path.parent.mkdir(parents=True, exist_ok=True)
+                total_samples = 0
+                sample_rate = int(model.sample_rate)
+                with dump_path.open("wb") as dump:
+                    for group in groups:
+                        voice = base_voice
+                        style_name = (
+                            _style_for_tags(group.tag_ids) if style_transfer else None
+                        )
+                        style_codes = (
+                            self._get_style_codes(model, style_name)
+                            if style_name is not None
+                            else None
+                        )
+                        if style_codes is not None:
+                            if speaker_emb is None:
+                                speaker_emb, ref_codes = model._resolve_ref(
+                                    builtin_voice,
+                                    None,
+                                    False,
+                                    True,
+                                )
+                                base_voice = {
+                                    "speaker_emb": speaker_emb,
+                                    "codes": ref_codes,
+                                }
+                            voice = {
                                 "speaker_emb": speaker_emb,
-                                "codes": ref_codes,
+                                "codes": style_codes,
                             }
-                        voice = {
-                            "speaker_emb": speaker_emb,
-                            "codes": style_codes,
-                        }
-                    temperature = _sampling_temperature(
-                        group.temperatures,
-                        cloning=cloning and style_codes is None,
-                    )
-                    audio = model.infer(
-                        group.engine_text,
-                        voice=voice,
-                        temperature=temperature,
-                        top_k=_CLONE_TOP_K if cloning else 25,
-                        top_p=_CLONE_TOP_P if cloning else 0.95,
-                        max_chars=_INFER_MAX_CHARS,
-                        # Watermarking (when installed) adds audible artifacts that
-                        # fight speaker identity; keep personal clones clean.
-                        apply_watermark=False,
-                    )
-                    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
-                    if not len(audio):
-                        raise RuntimeError("Engine trả về một đoạn âm thanh rỗng.")
-                    effective_speed = max(
-                        _MIN_EFFECTIVE_SPEED,
-                        min(
-                            _MAX_EFFECTIVE_SPEED,
-                            speed * _group_speed_multiplier(group.speed_multipliers),
-                        ),
-                    )
-                    audio = _safe_audio_effects(
-                        audio,
-                        model.sample_rate,
-                        speed=effective_speed,
-                        # A constant pitch shift changes timbre but does not create
-                        # human prosody.  Preserve VieNeu's formants and let the
-                        # reference, punctuation and sampling drive the contour.
-                        pitch_steps=0.0,
-                        gain_db=0.0,
-                        limit_peak=False,
-                    )
-                    audio = _trim_generated_edges(audio, model.sample_rate)
-                    audio = _fade_edges(audio, model.sample_rate, milliseconds=6)
-                    if group.pause_before_ms:
-                        rendered.append(
-                            np.zeros(
-                                round(model.sample_rate * group.pause_before_ms / 1000),
+                        temperature = _sampling_temperature(
+                            group.temperatures,
+                            cloning=cloning and style_codes is None,
+                        )
+                        audio = model.infer(
+                            group.engine_text,
+                            voice=voice,
+                            temperature=temperature,
+                            top_k=_CLONE_TOP_K if cloning else 25,
+                            top_p=_CLONE_TOP_P if cloning else 0.95,
+                            max_chars=_INFER_MAX_CHARS,
+                            apply_watermark=False,
+                        )
+                        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+                        if not len(audio):
+                            raise RuntimeError("Engine trả về một đoạn âm thanh rỗng.")
+                        effective_speed = max(
+                            _MIN_EFFECTIVE_SPEED,
+                            min(
+                                _MAX_EFFECTIVE_SPEED,
+                                speed * _group_speed_multiplier(group.speed_multipliers),
+                            ),
+                        )
+                        audio = _safe_audio_effects(
+                            audio,
+                            sample_rate,
+                            speed=effective_speed,
+                            pitch_steps=0.0,
+                            gain_db=0.0,
+                            limit_peak=False,
+                        )
+                        audio = _trim_generated_edges(audio, sample_rate)
+                        audio = _fade_edges(audio, sample_rate, milliseconds=6)
+                        if group.pause_before_ms:
+                            pause = np.zeros(
+                                round(sample_rate * group.pause_before_ms / 1000),
                                 dtype=np.float32,
                             )
-                        )
-                    rendered.append(audio)
+                            dump.write(pause.tobytes())
+                            total_samples += len(pause)
+                            del pause
+                        dump.write(audio.tobytes())
+                        total_samples += len(audio)
+                        del audio
+                        if _IS_SERVERLESS:
+                            import gc
 
-                rendered.append(
-                    np.zeros(round(model.sample_rate * 0.12), dtype=np.float32)
-                )
-                final_audio = np.concatenate(rendered)
+                            gc.collect()
+
+                    tail = np.zeros(round(sample_rate * 0.12), dtype=np.float32)
+                    dump.write(tail.tobytes())
+                    total_samples += len(tail)
+
+                if total_samples <= 0:
+                    raise RuntimeError("Engine không tạo được mẫu âm thanh.")
+                final_audio = np.fromfile(str(dump_path), dtype=np.float32)
+                dump_path.unlink(missing_ok=True)
+                dump_path = None
                 final_audio = _master_speech(final_audio)
                 model.save(final_audio, str(output_path))
+                del final_audio
             finally:
+                if dump_path is not None:
+                    dump_path.unlink(missing_ok=True)
                 if prepared_reference is not None:
                     prepared_reference.unlink(missing_ok=True)

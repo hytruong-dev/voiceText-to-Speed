@@ -52,7 +52,13 @@ class Settings:
     host: str = os.getenv("TEU_VOICE_HOST", "127.0.0.1")
     access_key: str | None = os.getenv("TEU_VOICE_ACCESS_KEY") or None
     ngrok_host: str | None = os.getenv("TEU_VOICE_NGROK_HOST") or None
-    max_text_chars: int = 2_000
+    max_text_chars: int = int(
+        os.getenv(
+            "TEU_VOICE_MAX_TEXT_CHARS",
+            # Cloud CPU + 2GB Hobby: long scripts OOM even after chunking; keep a hard cap.
+            "500" if _IS_SERVERLESS else "2000",
+        )
+    )
     max_upload_bytes: int = 20 * 1024 * 1024
 
     @property
