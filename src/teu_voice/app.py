@@ -18,23 +18,12 @@ from .config import Settings, is_loopback_host, settings as default_settings
 from .emotions import compile_emotion_script, tag_catalog
 from .engine import DEFAULT_SPEED, MAX_SPEED, MIN_SPEED, SpeechEngine, VieneuEngine
 from .jobs import JobManager, JobQueueFull
+from .voices import builtin_voice_ids, default_builtin_voice, list_builtin_voices, preferred_region
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-BUILTIN_VOICES = (
-    "Adam",
-    "Phạm Tuyên",
-    "Minh Đức",
-    "Trúc Ly",
-    "Mai Anh",
-    "Quỳnh Anh",
-    "Quang Sơn",
-    "Ngọc Trân",
-    "Xuân Vĩnh",
-    "Thái Sơn",
-    "Thùy Dung",
-    "Mỹ Duyên",
-)
+BUILTIN_VOICES = builtin_voice_ids()
+DEFAULT_BUILTIN_VOICE = default_builtin_voice()
 
 
 class PreviewRequest(BaseModel):
@@ -173,7 +162,12 @@ def create_app(
                 "styles": list(style_names),
                 "default": False,
             },
-            "builtin_voices": list(BUILTIN_VOICES),
+            "builtin_voices": [voice.to_dict() for voice in list_builtin_voices()],
+            "voice_region": {
+                "preferred": preferred_region(),
+                "default_builtin": DEFAULT_BUILTIN_VOICE,
+                "detail": "Ưu tiên giọng miền Nam / Sài Gòn cho giọng dựng sẵn.",
+            },
             "limits": {
                 "max_text_chars": cfg.max_text_chars,
                 "max_upload_mb": cfg.max_upload_bytes // (1024 * 1024),
@@ -208,7 +202,7 @@ def create_app(
         text: Annotated[str, Form()],
         speed: Annotated[float, Form(ge=MIN_SPEED, le=MAX_SPEED)] = DEFAULT_SPEED,
         reference_mode: Annotated[str, Form()] = "provided",
-        builtin_voice: Annotated[str, Form()] = "Adam",
+        builtin_voice: Annotated[str, Form()] = DEFAULT_BUILTIN_VOICE,
         denoise: Annotated[bool, Form()] = False,
         style_transfer: Annotated[bool, Form()] = False,
         consent: Annotated[bool, Form()] = False,

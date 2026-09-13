@@ -47,6 +47,8 @@ class Settings:
         "TEU_VOICE_PRECISION",
         "int8" if _IS_SERVERLESS else "fp32",
     ).lower()
+    # Bias builtin presets toward Saigon/Southern Vietnamese by default.
+    voice_region: str = os.getenv("TEU_VOICE_REGION", "nam").lower()
     host: str = os.getenv("TEU_VOICE_HOST", "127.0.0.1")
     access_key: str | None = os.getenv("TEU_VOICE_ACCESS_KEY") or None
     ngrok_host: str | None = os.getenv("TEU_VOICE_NGROK_HOST") or None

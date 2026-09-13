@@ -679,12 +679,17 @@ async function loadConfig() {
     updateSpeedLabel();
 
     elements.builtinVoice.replaceChildren();
-    for (const voice of state.config.builtin_voices) {
+    const voices = state.config.builtin_voices || [];
+    for (const voice of voices) {
       const option = document.createElement("option");
-      option.value = voice;
-      option.textContent = voice;
+      const id = typeof voice === "string" ? voice : voice.id;
+      const label = typeof voice === "string" ? voice : (voice.label || voice.id);
+      option.value = id;
+      option.textContent = label;
       elements.builtinVoice.append(option);
     }
+    const preferredBuiltin = state.config.voice_region?.default_builtin;
+    if (preferredBuiltin) elements.builtinVoice.value = preferredBuiltin;
 
     if (state.config.reference.available) {
       const ref = state.config.reference;
@@ -744,7 +749,7 @@ function buildJobForm() {
   form.append("text", elements.script.value);
   form.append("speed", elements.speed.value);
   form.append("reference_mode", state.source === "microphone" ? "upload" : state.source);
-  form.append("builtin_voice", elements.builtinVoice.value || "Adam");
+  form.append("builtin_voice", elements.builtinVoice.value || state.config?.voice_region?.default_builtin || "Adam");
   form.append("denoise", String(elements.denoise.checked));
   form.append("style_transfer", String(elements.styleTransfer.checked));
   form.append("consent", String(elements.consent.checked));
