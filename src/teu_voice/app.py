@@ -14,9 +14,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .audio import AudioValidationError, inspect_wav, validate_reference
-from .config import Settings, is_loopback_host, settings as default_settings
+from .config import Settings, _IS_SERVERLESS, is_loopback_host, settings as default_settings
 from .emotions import compile_emotion_script, tag_catalog
-from .engine import DEFAULT_SPEED, MAX_SPEED, MIN_SPEED, SpeechEngine, VieneuEngine
+from .engine import (
+    DEFAULT_SPEED,
+    MAX_SPEED,
+    MIN_SPEED,
+    SpeechEngine,
+    VieneuEngine,
+    _SERVERLESS_CLONE_MAX_CHARS,
+)
 from .jobs import JobManager, JobQueueFull
 from .voices import builtin_voice_ids, default_builtin_voice, list_builtin_voices, preferred_region
 
@@ -170,6 +177,9 @@ def create_app(
             },
             "limits": {
                 "max_text_chars": cfg.max_text_chars,
+                "max_clone_text_chars": (
+                    _SERVERLESS_CLONE_MAX_CHARS if _IS_SERVERLESS else cfg.max_text_chars
+                ),
                 "max_upload_mb": cfg.max_upload_bytes // (1024 * 1024),
                 "speed_min": MIN_SPEED,
                 "speed_max": MAX_SPEED,
@@ -278,12 +288,26 @@ def create_app(
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=503, detail=detail)
 
-        from .config import _IS_SERVERLESS
+        # Clone enrollment + synthesis barely fits Hobby 2GB; keep scripts short.
+        if _IS_SERVERLESS and reference_path is not None:
+            if len(normalized_text) > _SERVERLESS_CLONE_MAX_CHARS:
+                if cleanup_reference and reference_path is not None:
+                    reference_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Trên cloud, clone giọng chỉ ổn định dưới "
+                        f"{_SERVERLESS_CLONE_MAX_CHARS} ký tự. "
+                        "Hãy rút ngắn nội dung hoặc dùng giọng dựng sẵn."
+                    ),
+                )
 
         # Style codes double reference memory; keep off on Hobby 2GB.
         effective_style_transfer = bool(
             style_transfer and current_style_names() and not _IS_SERVERLESS
         )
+        # Denoiser weights are skipped on serverless loads; never request them.
+        effective_denoise = bool(denoise) and not _IS_SERVERLESS
         try:
             job = manager.submit(
                 text=normalized_text,
@@ -294,7 +318,7 @@ def create_app(
                 speed=speed,
                 reference_path=reference_path,
                 builtin_voice=builtin_voice,
-                denoise=denoise,
+                denoise=effective_denoise,
                 style_transfer=effective_style_transfer,
                 cleanup_reference=cleanup_reference,
             )
@@ -309,7 +333,8 @@ def create_app(
                 status_code=503,
                 detail=(
                     "Máy chủ cloud hết bộ nhớ khi dựng đoạn dài. "
-                    "Hãy rút ngắn nội dung (khoảng dưới 500 ký tự) rồi thử lại."
+                    "Hãy rút ngắn nội dung (khoảng dưới 250 ký tự), "
+                    "dùng giọng dựng sẵn, rồi thử lại."
                 ),
             ) from exc
         except ValueError as exc:

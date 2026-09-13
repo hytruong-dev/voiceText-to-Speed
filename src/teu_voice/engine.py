@@ -35,9 +35,10 @@ _CLONE_TOP_P = 0.9
 _BUILTIN_TEMPERATURE = 0.8
 _PRECLEAN_TOP_DB = 24
 # Serverless (Hobby ~2GB) OOMs when a single ONNX decode is too long; keep chunks tiny.
-_INFER_MAX_CHARS = 96 if _IS_SERVERLESS else 384
-_SERVERLESS_MAX_GROUPS = 24
-_SERVERLESS_MAX_GROUP_CHARS = 96
+_INFER_MAX_CHARS = 64 if _IS_SERVERLESS else 384
+_SERVERLESS_MAX_GROUPS = 20
+_SERVERLESS_MAX_GROUP_CHARS = 64
+_SERVERLESS_CLONE_MAX_CHARS = 120
 
 _STYLE_TAGS = {
     "excited": frozenset(
@@ -420,6 +421,50 @@ def _master_speech(audio: np.ndarray) -> np.ndarray:
     return np.asarray(result, dtype=np.float32)
 
 
+def _write_wav_from_f32_dump(dump_path: Path, output_path: Path, sample_rate: int) -> None:
+    """Stream float32 PCM dump → 16-bit WAV with light gain, low peak RAM."""
+
+    import wave
+
+    chunk_samples = sample_rate  # ~1 second
+    sum_sq = 0.0
+    total = 0
+    peak = 0.0
+    with dump_path.open("rb") as source:
+        while True:
+            raw = source.read(chunk_samples * 4)
+            if not raw:
+                break
+            block = np.frombuffer(raw, dtype=np.float32)
+            sum_sq += float(np.dot(block, block))
+            total += len(block)
+            peak = max(peak, float(np.max(np.abs(block))))
+    if total <= 0:
+        raise RuntimeError("Engine không tạo được mẫu âm thanh.")
+
+    rms = float(np.sqrt(sum_sq / total))
+    gain = 1.0
+    if rms > 1e-8:
+        current_rms_db = 20 * np.log10(rms)
+        makeup_db = min(_MASTER_MAX_MAKEUP_DB, _MASTER_TARGET_RMS_DB - current_rms_db)
+        gain = 10 ** (makeup_db / 20)
+    if peak * gain > _PEAK_CEILING and peak > 1e-8:
+        gain *= _PEAK_CEILING / (peak * gain)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with dump_path.open("rb") as source, wave.open(str(output_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        while True:
+            raw = source.read(chunk_samples * 4)
+            if not raw:
+                break
+            block = np.frombuffer(raw, dtype=np.float32) * np.float32(gain)
+            pcm = np.clip(block * 32767.0, -32768, 32767).astype(np.int16)
+            wav_file.writeframes(pcm.tobytes())
+
+
 class VieneuEngine:
     """Lazy, serialized adapter around the local VieNeu v3 Turbo model."""
 
@@ -687,12 +732,18 @@ class VieneuEngine:
 
                 if total_samples <= 0:
                     raise RuntimeError("Engine không tạo được mẫu âm thanh.")
-                final_audio = np.fromfile(str(dump_path), dtype=np.float32)
-                dump_path.unlink(missing_ok=True)
-                dump_path = None
-                final_audio = _master_speech(final_audio)
-                model.save(final_audio, str(output_path))
-                del final_audio
+                if _IS_SERVERLESS:
+                    # Avoid loading the full float32 program into RAM (OOM → SIGKILL).
+                    _write_wav_from_f32_dump(dump_path, output_path, sample_rate)
+                    dump_path.unlink(missing_ok=True)
+                    dump_path = None
+                else:
+                    final_audio = np.fromfile(str(dump_path), dtype=np.float32)
+                    dump_path.unlink(missing_ok=True)
+                    dump_path = None
+                    final_audio = _master_speech(final_audio)
+                    model.save(final_audio, str(output_path))
+                    del final_audio
             finally:
                 if dump_path is not None:
                     dump_path.unlink(missing_ok=True)

@@ -177,7 +177,16 @@ async function jsonRequest(url, options = {}) {
     // The fallback below is clearer than a JSON parse error.
   }
   if (!response.ok) {
-    const error = new Error(formatApiDetail(payload.detail, `Yêu cầu thất bại (${response.status}).`));
+    let message = formatApiDetail(payload.detail, "");
+    if (!message) {
+      if (response.status === 500 || response.status === 502 || response.status === 504) {
+        message =
+          "Máy chủ cloud hết bộ nhớ hoặc bị ngắt giữa chừng. Hãy rút ngắn nội dung (dưới 250 ký tự), dùng giọng dựng sẵn Adam, tắt mic/clone rồi thử lại.";
+      } else {
+        message = `Yêu cầu thất bại (${response.status}).`;
+      }
+    }
+    const error = new Error(message);
     error.status = response.status;
     throw error;
   }
@@ -200,8 +209,15 @@ function foldSearch(value) {
     .replace(/^_+|_+$/g, "");
 }
 
+function effectiveMaxTextChars() {
+  const limits = state.config?.limits || {};
+  const builtinMax = limits.max_text_chars || 2000;
+  if (state.source === "builtin") return builtinMax;
+  return limits.max_clone_text_chars || builtinMax;
+}
+
 function updateCharCount() {
-  const max = state.config?.limits?.max_text_chars || 2000;
+  const max = effectiveMaxTextChars();
   elements.charCount.textContent = `${elements.script.value.length.toLocaleString("vi-VN")} / ${max.toLocaleString("vi-VN")}`;
 }
 
@@ -406,6 +422,10 @@ function updateSource(source, { resetConsent = true } = {}) {
   elements.denoiseRow.hidden = !isClone;
   elements.denoise.checked = false;
   if (resetConsent && changed) elements.consent.checked = false;
+  if (state.config?.limits) {
+    elements.script.maxLength = effectiveMaxTextChars();
+  }
+  updateCharCount();
 }
 
 function encodeMonoWav(samples, sampleRate) {
@@ -610,8 +630,14 @@ function restoreStableResult() {
 function validateText() {
   const text = elements.script.value.trim();
   if (!text) throw new Error("Vui lòng nhập nội dung cần đọc.");
-  const max = state.config?.limits?.max_text_chars || 2000;
-  if (text.length > max) throw new Error(`Nội dung tối đa ${max.toLocaleString("vi-VN")} ký tự mỗi lượt.`);
+  const max = effectiveMaxTextChars();
+  if (text.length > max) {
+    const cloneHint =
+      state.source !== "builtin"
+        ? " (clone/mic trên cloud cần đoạn ngắn hơn)"
+        : "";
+    throw new Error(`Nội dung tối đa ${max.toLocaleString("vi-VN")} ký tự mỗi lượt${cloneHint}.`);
+  }
   return text;
 }
 
@@ -666,7 +692,7 @@ async function loadConfig() {
     state.config = await jsonRequest("/api/config");
     state.configLoaded = true;
     renderTagCatalog(state.config.emotion_tags);
-    elements.script.maxLength = state.config.limits.max_text_chars;
+    elements.script.maxLength = effectiveMaxTextChars();
     elements.speed.min = state.config.limits.speed_min;
     elements.speed.max = state.config.limits.speed_max;
     elements.speed.value = state.config.limits.speed_default;

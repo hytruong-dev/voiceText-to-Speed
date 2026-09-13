@@ -276,7 +276,8 @@ class JobManager:
             if isinstance(exc, MemoryError) or "SIGKILL" in message:
                 message = (
                     "Máy chủ cloud hết bộ nhớ khi dựng đoạn dài. "
-                    "Hãy rút ngắn nội dung (khoảng dưới 500 ký tự) rồi thử lại."
+                    "Hãy rút ngắn nội dung (khoảng dưới 250 ký tự), "
+                    "dùng giọng dựng sẵn, rồi thử lại."
                 )
             elif isinstance(exc, ValueError):
                 message = str(exc)

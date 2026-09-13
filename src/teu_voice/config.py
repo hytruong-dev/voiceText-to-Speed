@@ -55,12 +55,13 @@ class Settings:
     max_text_chars: int = int(
         os.getenv(
             "TEU_VOICE_MAX_TEXT_CHARS",
-            # Cloud CPU + 2GB Hobby: long scripts OOM even after chunking; keep a hard cap.
-            "500" if _IS_SERVERLESS else "2000",
+            # Cloud Hobby ~2GB: keep scripts short so ONNX decode never SIGKILL 137.
+            "280" if _IS_SERVERLESS else "2000",
         )
     )
-    max_upload_bytes: int = 20 * 1024 * 1024
-
+    max_upload_bytes: int = (
+        3 * 1024 * 1024 if _IS_SERVERLESS else 20 * 1024 * 1024
+    )
     @property
     def lan_enabled(self) -> bool:
         return is_private_lan_ipv4(self.host)
@@ -84,6 +85,12 @@ class Settings:
         # Disable progress bars in serverless to reduce log noise
         if _IS_SERVERLESS:
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            # Cap BLAS / ONNX threads so activation peaks stay under Hobby 2GB.
+            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+            os.environ.setdefault("MKL_NUM_THREADS", "1")
+            os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+            os.environ.setdefault("ORT_DISABLE_MEMORY_ARENA", "1")
 
 
 settings = Settings()
