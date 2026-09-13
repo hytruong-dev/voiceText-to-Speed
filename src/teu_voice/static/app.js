@@ -46,6 +46,7 @@ const elements = {
 };
 
 const suppliedAccessKey = new URLSearchParams(window.location.search).get("access_key") || "";
+const MIC_STORAGE_KEY = "teu-voice-microphone-reference-v1";
 
 const state = {
   config: null,
@@ -68,6 +69,73 @@ const state = {
   microphoneUrl: null,
   accessKey: suppliedAccessKey,
 };
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function persistMicrophoneSample(blob, duration) {
+  try {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    localStorage.setItem(
+      MIC_STORAGE_KEY,
+      JSON.stringify({
+        base64: bytesToBase64(bytes),
+        duration,
+        fileName: "microphone-reference.wav",
+        savedAt: Date.now(),
+      }),
+    );
+  } catch (_) {
+    // Quota or private mode — cloning still works for this session.
+  }
+}
+
+function clearPersistedMicrophoneSample() {
+  try {
+    localStorage.removeItem(MIC_STORAGE_KEY);
+  } catch (_) {
+    // Ignore storage failures.
+  }
+}
+
+function restorePersistedMicrophoneSample() {
+  try {
+    const raw = localStorage.getItem(MIC_STORAGE_KEY);
+    if (!raw) return false;
+    const payload = JSON.parse(raw);
+    if (!payload?.base64 || typeof payload.duration !== "number") {
+      clearPersistedMicrophoneSample();
+      return false;
+    }
+    const bytes = base64ToBytes(payload.base64);
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    state.microphoneFile = new File([blob], payload.fileName || "microphone-reference.wav", {
+      type: "audio/wav",
+    });
+    if (state.microphoneUrl) URL.revokeObjectURL(state.microphoneUrl);
+    state.microphoneUrl = URL.createObjectURL(blob);
+    elements.microphonePlayer.src = state.microphoneUrl;
+    elements.microphonePlayer.hidden = false;
+    elements.microphoneStatus.textContent = `Đã khôi phục mẫu mic ${Number(payload.duration).toFixed(1)} giây · sẵn sàng clone lại mà không cần thu mới.`;
+    return true;
+  } catch (_) {
+    clearPersistedMicrophoneSample();
+    return false;
+  }
+}
 
 function showError(message) {
   elements.formError.textContent = message;
@@ -366,6 +434,48 @@ function encodeMonoWav(samples, sampleRate) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+function trimAndNormalizeCloneSamples(samples, sampleRate) {
+  const threshold = 0.012;
+  let start = 0;
+  let end = samples.length - 1;
+  while (start < samples.length && Math.abs(samples[start]) <= threshold) start += 1;
+  while (end > start && Math.abs(samples[end]) <= threshold) end -= 1;
+  const guard = Math.floor(sampleRate * 0.08);
+  start = Math.max(0, start - guard);
+  end = Math.min(samples.length - 1, end + guard);
+  let trimmed = samples.subarray(start, end + 1);
+
+  const maxSeconds = 7.6;
+  const maxSamples = Math.floor(sampleRate * maxSeconds);
+  if (trimmed.length > maxSamples) trimmed = trimmed.subarray(0, maxSamples);
+
+  let peak = 0;
+  for (let index = 0; index < trimmed.length; index += 1) {
+    peak = Math.max(peak, Math.abs(trimmed[index]));
+  }
+  if (peak < 0.02) {
+    return { error: "Mẫu quá nhỏ; hãy thu gần mic hơn rồi thử lại." };
+  }
+  if (peak >= 0.985) {
+    return { error: "Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng." };
+  }
+
+  const targetPeak = 10 ** (-2.5 / 20);
+  const gain = targetPeak / peak;
+  const normalized = new Float32Array(trimmed.length);
+  for (let index = 0; index < trimmed.length; index += 1) {
+    normalized[index] = trimmed[index] * gain;
+  }
+
+  const fade = Math.min(Math.floor(sampleRate * 0.01), Math.floor(normalized.length / 2));
+  for (let index = 0; index < fade; index += 1) {
+    const ramp = index / fade;
+    normalized[index] *= ramp;
+    normalized[normalized.length - 1 - index] *= ramp;
+  }
+  return { samples: normalized, peak, duration: normalized.length / sampleRate };
+}
+
 function discardMicrophoneCapture() {
   const capture = state.microphoneCapture;
   if (capture) {
@@ -380,7 +490,7 @@ function discardMicrophoneCapture() {
   elements.microphoneButton.textContent = "Bắt đầu thu";
 }
 
-function resetMicrophoneSample(message) {
+function clearMicrophoneUi(message) {
   state.microphoneFile = null;
   if (state.microphoneUrl) URL.revokeObjectURL(state.microphoneUrl);
   state.microphoneUrl = null;
@@ -390,6 +500,11 @@ function resetMicrophoneSample(message) {
   elements.microphoneStatus.textContent = message;
 }
 
+function resetMicrophoneSample(message, { clearStorage = true } = {}) {
+  clearMicrophoneUi(message);
+  if (clearStorage) clearPersistedMicrophoneSample();
+}
+
 function finishMicrophoneCapture() {
   const capture = state.microphoneCapture;
   if (!capture) return;
@@ -397,35 +512,28 @@ function finishMicrophoneCapture() {
   const sampleCount = capture.chunks.reduce((total, chunk) => total + chunk.length, 0);
   const collectedSamples = new Float32Array(sampleCount);
   let offset = 0;
-  let peak = 0;
   for (const chunk of capture.chunks) {
     collectedSamples.set(chunk, offset);
     offset += chunk.length;
-    for (const sample of chunk) peak = Math.max(peak, Math.abs(sample));
   }
-  // Leave a safety margin below the backend's 8-second clone limit: a browser
-  // callback can arrive a fraction of a second after the visible timer.
-  const maximumSamples = Math.floor(capture.sampleRate * 7.8);
-  const samples = collectedSamples.length > maximumSamples
-    ? collectedSamples.slice(0, maximumSamples)
-    : collectedSamples;
-  const duration = samples.length / capture.sampleRate;
-  if (duration < 5.8) {
-    resetMicrophoneSample("Mẫu còn ngắn; hãy thu liền mạch ít nhất 6 giây để clone giữ màu giọng tốt hơn.");
+  const prepared = trimAndNormalizeCloneSamples(collectedSamples, capture.sampleRate);
+  if (prepared.error) {
+    resetMicrophoneSample(prepared.error);
     return;
   }
-  if (peak >= 0.985) {
-    resetMicrophoneSample("Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng.");
+  if (prepared.duration < 5.8) {
+    resetMicrophoneSample("Phần tiếng nói thực còn ngắn; hãy thu liền mạch ít nhất 6 giây để clone giữ màu giọng tốt hơn.");
     return;
   }
-  const blob = encodeMonoWav(samples, capture.sampleRate);
+  const blob = encodeMonoWav(prepared.samples, capture.sampleRate);
   state.microphoneFile = new File([blob], "microphone-reference.wav", { type: "audio/wav" });
   if (state.microphoneUrl) URL.revokeObjectURL(state.microphoneUrl);
   state.microphoneUrl = URL.createObjectURL(blob);
   elements.microphonePlayer.src = state.microphoneUrl;
   elements.microphonePlayer.hidden = false;
-  elements.microphoneStatus.textContent = `Đã thu ${duration.toFixed(1)} giây · không clipping · sẵn sàng clone đúng màu mic này.`;
+  elements.microphoneStatus.textContent = `Đã thu ${prepared.duration.toFixed(1)} giây · đã chuẩn hóa mức âm · sẵn sàng clone đúng màu mic này.`;
   elements.consent.checked = false;
+  void persistMicrophoneSample(blob, prepared.duration);
 }
 
 async function toggleMicrophoneCapture() {
@@ -439,16 +547,18 @@ async function toggleMicrophoneCapture() {
     return;
   }
   try {
-    resetMicrophoneSample("Đang xin quyền dùng micro…");
+    clearMicrophoneUi("Đang xin quyền dùng micro…");
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: { ideal: 1 },
+        sampleRate: { ideal: 48000 },
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
       },
     });
-    const context = new AudioContext();
+    clearPersistedMicrophoneSample();
+    const context = new AudioContext({ sampleRate: 48000 });
     await context.resume();
     const source = context.createMediaStreamSource(stream);
     const processor = context.createScriptProcessor(4096, 1, 1);
@@ -479,7 +589,9 @@ async function toggleMicrophoneCapture() {
     state.microphoneCapture = capture;
     elements.microphoneButton.textContent = "Dừng & dùng mẫu";
   } catch (error) {
-    resetMicrophoneSample("Không thể dùng micro.");
+    if (!restorePersistedMicrophoneSample()) {
+      clearMicrophoneUi("Không thể dùng micro.");
+    }
     showError(error.name === "NotAllowedError" ? "Bạn cần cho phép trình duyệt dùng micro để thu mẫu giọng." : error.message);
   }
 }
@@ -562,7 +674,7 @@ async function loadConfig() {
     elements.styleTransfer.checked = Boolean(styleConfig.available && styleConfig.default);
     elements.styleTransfer.disabled = !styleConfig.available;
     elements.styleTransferRow.hidden = !styleConfig.available;
-    elements.uploadHint.textContent = `Giọng rõ, một người nói, không nhạc nền · tối đa ${state.config.limits.max_upload_mb} MB`;
+    elements.uploadHint.textContent = `Tự chọn cửa sổ 6–8 giây sạch nhất · tối đa ${state.config.limits.max_upload_mb} MB`;
     updateCharCount();
     updateSpeedLabel();
 
@@ -776,7 +888,7 @@ elements.script.addEventListener("blur", () => setTimeout(closeSuggestions, 120)
 elements.speed.addEventListener("input", updateSpeedLabel);
 elements.referenceFile.addEventListener("change", () => {
   const file = elements.referenceFile.files[0];
-  elements.fileLabel.textContent = file ? file.name : "Chọn mẫu WAV 3–8 giây";
+  elements.fileLabel.textContent = file ? file.name : "Chọn mẫu WAV 3–60 giây";
   elements.consent.checked = false;
 });
 elements.microphoneButton.addEventListener("click", toggleMicrophoneCapture);
@@ -797,6 +909,11 @@ document.addEventListener("pointerdown", (event) => {
 
 updateCharCount();
 updateSpeedLabel();
-updateSource("provided", { resetConsent: false });
+const restoredMic = restorePersistedMicrophoneSample();
+updateSource(restoredMic ? "microphone" : "provided", { resetConsent: false });
+if (restoredMic) {
+  const microphoneRadio = document.querySelector('input[name="voice-source"][value="microphone"]');
+  if (microphoneRadio) microphoneRadio.checked = true;
+}
 syncControls();
 loadConfig();

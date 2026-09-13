@@ -114,8 +114,8 @@
             <label class="drop-zone" for="reference-file">
               <input id="reference-file" type="file" accept="audio/wav,.wav" />
               <span class="drop-icon">＋</span>
-              <strong id="file-label">Chọn mẫu WAV 3–8 giây</strong>
-              <small id="upload-hint">Giọng rõ, một người nói, không nhạc nền · đang tải giới hạn…</small>
+              <strong id="file-label">Chọn mẫu WAV 3–60 giây</strong>
+              <small id="upload-hint">Hệ thống tự chọn cửa sổ 6–8 giây sạch nhất · mono/stereo PCM đều được</small>
             </label>
           </div>
 
@@ -128,7 +128,7 @@
               <button id="microphone-button" class="button secondary" type="button">Bắt đầu thu</button>
             </div>
             <audio id="microphone-player" controls preload="metadata" aria-label="Nghe lại mẫu mic vừa thu" hidden></audio>
-            <p class="mic-note">Mẫu này được gửi trực tiếp vào lượt clone hiện tại rồi tự xóa. Nếu báo quá âm lượng, hãy hạ gain mic trước khi thu lại.</p>
+            <p class="mic-note">Mẫu mic được cắt silence, chuẩn hóa mức âm, rồi lưu trên trình duyệt này để refresh vẫn dùng lại được. Tắt “chuyển phong cách” để giữ đúng màu giọng bạn.</p>
           </div>
 
           <div id="builtin-source" class="voice-source">

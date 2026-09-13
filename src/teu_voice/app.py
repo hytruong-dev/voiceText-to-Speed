@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from hmac import compare_digest
 from contextlib import asynccontextmanager
@@ -260,7 +261,9 @@ def create_app(
             reference_path.write_bytes(content)
             cleanup_reference = True
             try:
-                validate_reference(reference_path)
+                # Allow longer source clips; the engine picks the densest 3–8 s
+                # speech window before enrollment.
+                validate_reference(reference_path, strict_duration=False)
             except AudioValidationError as exc:
                 reference_path.unlink(missing_ok=True)
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -269,7 +272,7 @@ def create_app(
 
         if reference_path is not None:
             try:
-                validate_reference(reference_path)
+                validate_reference(reference_path, strict_duration=False)
             except AudioValidationError as exc:
                 if cleanup_reference:
                     reference_path.unlink(missing_ok=True)
