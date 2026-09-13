@@ -3,7 +3,7 @@
   "functions": {
     "src/teu_voice/app.py": {
       "maxDuration": 300,
-      "memory": 3009,
+      "memory": 2048,
       "excludeFiles": "{tests/**,scripts/**,docs/**,.cache/**,outputs/**,data/**,.venv/**,*.ps1,*.md,uv.lock,LICENSE}"
     }
   }
