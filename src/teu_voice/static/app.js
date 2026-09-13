@@ -665,10 +665,24 @@ function titleForTags(ids = []) {
 function finishActiveJob(job) {
   if (state.polling) clearTimeout(state.polling);
   state.polling = null;
-  const audioUrl = new URL(authorizedUrl(job.audio_url), window.location.origin);
-  audioUrl.searchParams.set("v", String(Date.now()));
-  elements.resultPlayer.src = `${audioUrl.pathname}${audioUrl.search}`;
-  elements.downloadLink.href = authorizedUrl(job.audio_url);
+
+  // Serverless mode: backend embeds audio as base64 in the response.
+  // Use a Blob URL to avoid a separate /audio/ fetch that would hit a
+  // different stateless instance with an empty /tmp.
+  if (job.audio_b64) {
+    const bytes = Uint8Array.from(atob(job.audio_b64), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    const blobUrl = URL.createObjectURL(blob);
+    elements.resultPlayer.src = blobUrl;
+    elements.downloadLink.href = blobUrl;
+    elements.downloadLink.download = job.output_name || "teu-voice.wav";
+  } else {
+    const audioUrl = new URL(authorizedUrl(job.audio_url), window.location.origin);
+    audioUrl.searchParams.set("v", String(Date.now()));
+    elements.resultPlayer.src = `${audioUrl.pathname}${audioUrl.search}`;
+    elements.downloadLink.href = authorizedUrl(job.audio_url);
+  }
+
   elements.trackTitle.textContent = titleForTags(job.emotion_tags);
   const styleText = job.effects?.style_transfer ? " · mẫu phong cách" : "";
   elements.trackMeta.textContent = `${job.duration_seconds.toFixed(2)} giây · ${formatSpeed(job.speed)}×${styleText} · WAV 48 kHz · local`;
@@ -725,7 +739,15 @@ async function createJob() {
   try {
     const job = await jsonRequest("/api/jobs", { method: "POST", body: buildJobForm() });
     state.pendingJob = { ...state.pendingJob, id: job.id };
-    await pollJob(job.id);
+    // Serverless mode: synthesis runs synchronously, so the POST response
+    // already contains the final status. Skip polling in that case.
+    if (job.status === "done") {
+      finishActiveJob(job);
+    } else if (job.status === "error" || job.status === "cancelled") {
+      endActiveJobWithError(job.error || "Engine không thể tạo giọng.");
+    } else {
+      await pollJob(job.id);
+    }
   } catch (error) {
     endActiveJobWithError(error.message);
   }

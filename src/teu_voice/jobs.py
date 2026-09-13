@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -49,12 +50,17 @@ class SynthesisJob:
     output_name: str | None = None
     duration_seconds: float | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # In serverless mode, audio bytes are base64-encoded and stored here so they
+    # survive across different function instances (no shared /tmp filesystem).
+    audio_b64: str | None = field(default=None, repr=False)
 
-    def public_dict(self) -> dict[str, object]:
+    def public_dict(self, *, include_audio: bool = False) -> dict[str, object]:
         payload = asdict(self)
         payload.pop("engine_segments", None)
         payload.pop("reference_path", None)
         payload.pop("cleanup_reference", None)
+        # Don't expose raw base64 by default (large payload)
+        audio_b64_val = payload.pop("audio_b64", None)
         payload["effects"] = {
             "speed": self.speed,
             "segment_count": len(self.engine_segments),
@@ -65,6 +71,10 @@ class SynthesisJob:
             payload["audio_url"] = f"/audio/{self.output_name}"
         else:
             payload["audio_url"] = None
+        # In serverless mode, embed audio as base64 so frontend can play it
+        # without needing a separate /audio/{file} request to the same instance.
+        if include_audio and audio_b64_val:
+            payload["audio_b64"] = audio_b64_val
         return payload
 
 
@@ -84,8 +94,8 @@ def _job_state_path(output_dir: Path, job_id: str) -> Path:
 
 
 def _save_job_state(output_dir: Path, job: SynthesisJob) -> None:
-    """Persist a job's public state to a JSON file."""
-    data = job.public_dict()
+    """Persist a job's public state (including embedded audio) to a JSON file."""
+    data = job.public_dict(include_audio=True)
     # Include fields needed to reconstruct status checks
     data["status"] = job.status
     data["stage"] = job.stage
@@ -169,6 +179,8 @@ class JobManager:
         if _IS_SERVERLESS:
             # On serverless: run synthesis synchronously within this request.
             # The response is held open until synthesis completes.
+            # Audio bytes are embedded in the job state so they survive across
+            # different serverless instances (no shared /tmp).
             self._jobs[job_id] = job
             self._run(job_id)
         else:
@@ -198,7 +210,7 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
-                return job.public_dict()
+                return job.public_dict(include_audio=_IS_SERVERLESS)
 
         # In serverless mode, fall back to file-based state
         if _IS_SERVERLESS:
@@ -261,12 +273,21 @@ class JobManager:
                 raise RuntimeError("Engine không tạo được tệp âm thanh.")
             info = inspect_wav(temporary_output)
             temporary_output.replace(output_path)
+            # In serverless mode: embed audio as base64 so the response carries
+            # the audio data directly — no separate /audio/ fetch required.
+            audio_b64: str | None = None
+            if _IS_SERVERLESS and output_path.exists():
+                try:
+                    audio_b64 = base64.b64encode(output_path.read_bytes()).decode()
+                except Exception:
+                    audio_b64 = None
             self._update(
                 job_id,
                 status="done",
                 stage="Hoàn tất",
                 output_name=output_name,
                 duration_seconds=info.duration_seconds,
+                audio_b64=audio_b64,
             )
         except Exception as exc:  # The worker must always surface model errors to the UI.
             temporary_output.unlink(missing_ok=True)

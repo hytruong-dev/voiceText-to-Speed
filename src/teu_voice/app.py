@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from hmac import compare_digest
 from contextlib import asynccontextmanager
@@ -300,7 +301,8 @@ def create_app(
             if cleanup_reference and reference_path is not None:
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=429, detail=str(exc)) from exc
-        return manager.get_public(job.id) or job.public_dict()
+        from .jobs import _IS_SERVERLESS as _SL
+        return manager.get_public(job.id) or job.public_dict(include_audio=_SL)
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
