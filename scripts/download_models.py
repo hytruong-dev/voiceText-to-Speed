@@ -6,14 +6,24 @@ into the Vercel deployment instead of being downloaded at cold-start runtime
 Vercel calls this via [tool.vercel.scripts] build in pyproject.toml.
 The script runs after 'uv sync', so huggingface_hub is available.
 
+IMPORTANT — bundle size:
+  Python deps (vieneu/onnxruntime/librosa/gradio/…) + int8 models are ~900MB–1GB.
+  That exceeds the standard 500MB Python function limit. Enable Large Functions
+  (up to 5GB) by setting the project env var:
+
+      VERCEL_SUPPORT_LARGE_FUNCTIONS=1
+
+  then redeploy. Fluid compute must be on (default for new projects).
+
 Files downloaded:
   - pnnbao-ump/VieNeu-TTS-v3-Turbo (onnx_int8 subfolder only) — ~157MB
   - OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX (codec) — ~86MB
-  Total: ~243MB (fits within Vercel 5GB Large Function limit)
+  Total models: ~243MB (plus runtime packages in the same function bundle)
 """
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -23,7 +33,15 @@ BUNDLE_DIR = PROJECT_ROOT / "model_cache"
 VIENEU_DIR = BUNDLE_DIR / "vieneu"
 CODEC_DIR = BUNDLE_DIR / "codec"
 
-# Only download int8 (smaller) to fit within Vercel's bundle size budget
+# Keep HuggingFace's own download cache OUT of the project tree so Vercel does
+# not double-count blob copies inside the function bundle.
+_HF_SCRATCH = PROJECT_ROOT / ".cache" / "hf-download"
+os.environ.setdefault("HF_HOME", str(_HF_SCRATCH))
+os.environ.setdefault("HF_HUB_CACHE", str(_HF_SCRATCH / "hub"))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_HF_SCRATCH / "hub"))
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
+# Only download int8 (smaller) to keep the Large Function payload lean
 VIENEU_REPO = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
 CODEC_REPO = "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX"
 
@@ -49,6 +67,23 @@ CODEC_FILES = [
 ]
 
 
+def _purge_nested_hub_junk(root: Path) -> None:
+    """Remove HF hub metadata clones that inflate the deploy bundle."""
+
+    for name in (".cache", ".huggingface", ".locks"):
+        junk = root / name
+        if junk.exists():
+            shutil.rmtree(junk, ignore_errors=True)
+            print(f"[download_models] Removed nested {junk.relative_to(PROJECT_ROOT)}", flush=True)
+
+
+def _dir_size_mb(root: Path) -> int:
+    if not root.exists():
+        return 0
+    total = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    return total // 1024 // 1024
+
+
 def download():
     try:
         from huggingface_hub import hf_hub_download
@@ -59,7 +94,10 @@ def download():
         sys.exit(0)  # Don't fail the build — runtime will handle it
 
     hf_token = os.getenv("HF_TOKEN")
-    common_kwargs: dict = {}
+    common_kwargs: dict = {
+        # Flat files only — avoid symlink farms that leave duplicate blobs behind.
+        "local_dir_use_symlinks": False,
+    }
     if hf_token:
         common_kwargs["token"] = hf_token
         print("[download_models] Using HF_TOKEN for authenticated downloads.", flush=True)
@@ -67,6 +105,7 @@ def download():
         print("[download_models] No HF_TOKEN — using unauthenticated (rate-limited).", flush=True)
 
     BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+    _HF_SCRATCH.mkdir(parents=True, exist_ok=True)
 
     print(f"[download_models] Downloading VieNeu int8 + codec to: {BUNDLE_DIR}", flush=True)
 
@@ -114,10 +153,17 @@ def download():
             print(f"  [ERR]  {fname}: {e}", flush=True)
             sys.exit(1)
 
-    total_bytes = sum(
-        f.stat().st_size for f in BUNDLE_DIR.rglob("*") if f.is_file()
+    _purge_nested_hub_junk(BUNDLE_DIR)
+    _purge_nested_hub_junk(VIENEU_DIR)
+    _purge_nested_hub_junk(CODEC_DIR)
+
+    total_mb = _dir_size_mb(BUNDLE_DIR)
+    print(f"[download_models] ✅ Done. Total model cache: {total_mb}MB", flush=True)
+    print(
+        "[download_models] Reminder: set VERCEL_SUPPORT_LARGE_FUNCTIONS=1 "
+        "(Large Functions / up to 5GB) — deps+models exceed the 500MB Python limit.",
+        flush=True,
     )
-    print(f"[download_models] ✅ Done. Total model cache: {total_bytes // 1024 // 1024}MB", flush=True)
 
 
 if __name__ == "__main__":
