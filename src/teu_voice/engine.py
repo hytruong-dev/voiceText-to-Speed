@@ -337,8 +337,13 @@ class VieneuEngine:
                             f"📦 Using bundled model cache at {BUNDLED_MODEL_CACHE}",
                             flush=True,
                         )
-                        # Pass local dirs directly to vieneu so it skips HF download
+                        # Pass local dirs directly to vieneu so it skips ALL HF downloads:
+                        # - onnx_dir: backbone ONNX graphs (int8/fp32)
+                        # - backbone_repo: local dir so speaker_encoder.onnx is found locally
+                        #   (OnnxSpeakerEncoder.from_pretrained checks os.path.isdir first)
+                        # - moss_tokenizer: codec ONNX files
                         kwargs["onnx_dir"] = str(vieneu_onnx_dir)
+                        kwargs["backbone_repo"] = str(vieneu_dir)
                         if bundled_codec_meta.exists():
                             kwargs["moss_tokenizer"] = str(codec_dir)
                     else:
