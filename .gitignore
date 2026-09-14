@@ -22,3 +22,4 @@ outputs/*
 .vercel
 
 .env*
+.pytest_tmp/
