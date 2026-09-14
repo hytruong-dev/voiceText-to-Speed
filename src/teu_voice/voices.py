@@ -8,7 +8,9 @@ from pathlib import Path
 
 
 # Preferred order for a Saigon-leaning studio: Southern first, then Central.
+# Custom voices (from data/custom_voices.json) appear first.
 _SOUTHERN_FIRST = (
+    "Vlogger",
     "Adam",
     "Xuân Vĩnh",
     "Thái Sơn",
@@ -77,20 +79,27 @@ def preferred_region() -> str:
 
 
 @lru_cache(maxsize=1)
-def _preset_metadata() -> dict[str, dict[str, str]]:
-    try:
-        import vieneu
+def _custom_voice_metadata() -> dict[str, dict[str, str]]:
+    """Load metadata for user-defined voices.
 
-        asset = Path(vieneu.__file__).resolve().parent / "assets" / "voices_v3_turbo.json"
-        if asset.is_file():
-            payload = json.loads(asset.read_text(encoding="utf-8"))
+    Looks for custom_voices.json next to this module (bundled into the package
+    on Vercel) first, then falls back to data/custom_voices.json for local dev.
+    """
+    try:
+        # 1) Bundled alongside the package (Vercel deployment)
+        pkg_path = Path(__file__).resolve().parent / "custom_voices.json"
+        # 2) Local dev: data/ at project root
+        data_dir = Path(__file__).resolve().parents[2] / "data"
+        custom_path = pkg_path if pkg_path.is_file() else data_dir / "custom_voices.json"
+        if custom_path.is_file():
+            payload = json.loads(custom_path.read_text(encoding="utf-8"))
             presets = payload.get("presets") or {}
             return {
                 name: {
                     "region": str(meta.get("region") or ""),
                     "gender": str(meta.get("gender") or ""),
                     "style": str(meta.get("style") or ""),
-                    "description": str(meta.get("description") or ""),
+                    "description": str(meta.get("description") or name),
                 }
                 for name, meta in presets.items()
                 if isinstance(meta, dict)
@@ -98,6 +107,30 @@ def _preset_metadata() -> dict[str, dict[str, str]]:
     except Exception:  # noqa: BLE001
         pass
     return {}
+
+
+@lru_cache(maxsize=1)
+def _preset_metadata() -> dict[str, dict[str, str]]:
+    # Start with custom voices so they can override or extend builtins
+    result: dict[str, dict[str, str]] = dict(_custom_voice_metadata())
+    try:
+        import vieneu
+
+        asset = Path(vieneu.__file__).resolve().parent / "assets" / "voices_v3_turbo.json"
+        if asset.is_file():
+            payload = json.loads(asset.read_text(encoding="utf-8"))
+            presets = payload.get("presets") or {}
+            for name, meta in presets.items():
+                if isinstance(meta, dict) and name not in result:
+                    result[name] = {
+                        "region": str(meta.get("region") or ""),
+                        "gender": str(meta.get("gender") or ""),
+                        "style": str(meta.get("style") or ""),
+                        "description": str(meta.get("description") or ""),
+                    }
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 def _voice_from_name(name: str) -> BuiltinVoice:

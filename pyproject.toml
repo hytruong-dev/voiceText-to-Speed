@@ -32,6 +32,9 @@ teu-voice = "teu_voice.__main__:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/teu_voice"]
 
+[tool.hatch.build.targets.wheel.include]
+"src/teu_voice/custom_voices.json" = "teu_voice/custom_voices.json"
+
 
 [tool.vercel]
 entrypoint = "src.teu_voice.app:app"

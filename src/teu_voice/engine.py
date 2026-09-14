@@ -554,19 +554,85 @@ class VieneuEngine:
                             f"📦 Using bundled model cache at {BUNDLED_MODEL_CACHE}",
                             flush=True,
                         )
-                        # Pass local dirs directly to vieneu so it skips HF download
+                        # Pass local dirs directly so vieneu skips ALL HF downloads:
+                        # - onnx_dir: backbone ONNX graphs (int8/fp32)
+                        # - backbone_repo: local dir so speaker_encoder.onnx loads locally
+                        # - moss_tokenizer: codec path accepted by V3TurboVieNeuTTS
+                        # V3TurboVieNeuTTS does NOT forward codec_dir to OnnxV3LiteEngine,
+                        # so we monkey-patch the constructor to inject it before Vieneu().
                         kwargs["onnx_dir"] = str(vieneu_onnx_dir)
+                        kwargs["backbone_repo"] = str(vieneu_dir)
                         if bundled_codec_meta.exists():
                             kwargs["moss_tokenizer"] = str(codec_dir)
+                            # Monkey-patch OnnxV3LiteEngine so it receives codec_dir
+                            # even though V3TurboVieNeuTTS doesn't forward it.
+                            try:
+                                from vieneu._v3_turbo_engine import (
+                                    onnx_runtime_lite as _ort_mod,
+                                )
+                                _orig_ort_init = _ort_mod.OnnxV3LiteEngine.__init__
+                                _bundled_codec = str(codec_dir)
+
+                                def _patched_ort_init(self_eng, *a, **kw):
+                                    if "codec_dir" not in kw:
+                                        kw["codec_dir"] = _bundled_codec
+                                    _orig_ort_init(self_eng, *a, **kw)
+
+                                _ort_mod.OnnxV3LiteEngine.__init__ = _patched_ort_init
+                            except Exception:  # noqa: BLE001
+                                pass
                     else:
                         print(
-                            f"🌐 No bundled model files found — downloading from HuggingFace (int8={precision == 'int8'})",
+                            f"🌐 No bundled model files found — downloading from HuggingFace "
+                            f"(int8={precision == 'int8'})",
                             flush=True,
                         )
 
                     self._model = Vieneu(**kwargs)
                     self._redirect_reference_temp(self._model)
+                    self._load_custom_voices(self._model)
         return self._model
+
+    def _load_custom_voices(self, model) -> None:
+        """Inject user-defined voices from custom_voices.json into the model.
+
+        Looks for the file next to this module first (bundled into the Vercel package),
+        then falls back to data/custom_voices.json for local development.
+
+        The JSON stores precomputed speaker_emb + codes for each voice, so no audio
+        processing happens at cold-start. Format mirrors voices_v3_turbo.json:
+        {"presets": {"VoiceName": {"speaker_emb": [...], "codes": [[...]], ...}}}
+        """
+        import json
+
+        pkg_path = Path(__file__).resolve().parent / "custom_voices.json"
+        custom_path = pkg_path if pkg_path.is_file() else self.settings.data_dir / "custom_voices.json"
+        if not custom_path.is_file():
+            return
+        try:
+            data = json.loads(custom_path.read_text(encoding="utf-8"))
+            presets = data.get("presets") or {}
+            count = 0
+            for name, meta in presets.items():
+                emb_list = meta.get("speaker_emb")
+                codes_list = meta.get("codes")
+                if not emb_list or not codes_list:
+                    continue
+                emb = np.asarray(emb_list, dtype=np.float32)
+                codes = np.asarray(codes_list)
+                # Inject directly into model's preset registry (same format as _load_v3_voices)
+                model._preset_voices[name] = {
+                    "description": meta.get("description", name),
+                    "gender": meta.get("gender", ""),
+                    "style": meta.get("style", "tu_nhien"),
+                    "speaker_emb": emb,
+                    "codes": codes,
+                }
+                count += 1
+            if count:
+                print(f"🎙️ Loaded {count} custom voice(s): {list(presets.keys())}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ Could not load custom_voices.json: {exc}", flush=True)
 
     def _redirect_reference_temp(self, model) -> None:
         """Keep VieNeu's pre-cleaned voice clip inside the project sandbox.
