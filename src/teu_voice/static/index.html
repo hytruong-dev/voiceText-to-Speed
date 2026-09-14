@@ -96,6 +96,7 @@
             <label><input type="radio" name="voice-source" value="provided" checked /><span>Mẫu đã gửi</span></label>
             <label><input type="radio" name="voice-source" value="microphone" /><span>Thu mic</span></label>
             <label><input type="radio" name="voice-source" value="upload" /><span>Tải WAV khác</span></label>
+            <!-- "Tải WAV khác" label kept for layout; input accepts MP3/OGG too -->
             <label><input type="radio" name="voice-source" value="builtin" /><span>Giọng dựng sẵn</span></label>
           </div>
 
@@ -112,10 +113,10 @@
 
           <div id="upload-source" class="voice-source">
             <label class="drop-zone" for="reference-file">
-              <input id="reference-file" type="file" accept="audio/wav,.wav" />
+              <input id="reference-file" type="file" accept="audio/wav,audio/mpeg,audio/mp3,audio/ogg,audio/flac,audio/x-m4a,audio/aac,.wav,.mp3,.ogg,.flac,.m4a,.aac" />
               <span class="drop-icon">＋</span>
-              <strong id="file-label">Chọn mẫu WAV 3–60 giây</strong>
-              <small id="upload-hint">Hệ thống tự chọn cửa sổ 6–8 giây sạch nhất · mono/stereo PCM đều được</small>
+              <strong id="file-label">Chọn mẫu giọng 3–60 giây</strong>
+              <small id="upload-hint">Hỗ trợ WAV · MP3 · OGG · FLAC · M4A · hệ thống tự chọn cửa sổ 6–8 giây tốt nhất</small>
             </label>
           </div>
 

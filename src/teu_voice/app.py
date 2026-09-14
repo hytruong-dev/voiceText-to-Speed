@@ -13,7 +13,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .audio import AudioValidationError, inspect_wav, validate_reference
+from .audio import (
+    AudioValidationError,
+    _SUPPORTED_AUDIO_SUFFIXES,
+    convert_to_wav,
+    inspect_wav,
+    validate_reference,
+)
 from .config import Settings, _IS_SERVERLESS, is_loopback_host, settings as default_settings
 from .emotions import compile_emotion_script, tag_catalog
 from .engine import (
@@ -270,19 +276,32 @@ def create_app(
                     detail="Bạn cần xác nhận quyền sử dụng mẫu giọng trước khi clone.",
                 )
             if reference_file is None:
-                raise HTTPException(status_code=422, detail="Vui lòng chọn một tệp WAV.")
-            suffix = Path(reference_file.filename or "").suffix.lower()
-            if suffix != ".wav":
-                raise HTTPException(status_code=422, detail="Mẫu giọng tải lên phải là WAV.")
+                raise HTTPException(
+                    status_code=422, detail="Vui lòng chọn một tệp âm thanh (WAV, MP3, OGG…)."
+                )
+            suffix = Path(reference_file.filename or "ref").suffix.lower() or ".bin"
+            if suffix not in _SUPPORTED_AUDIO_SUFFIXES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Định dạng '{suffix}' chưa hỗ trợ. Hãy dùng WAV, MP3, OGG, FLAC hoặc M4A.",
+                )
             content = await reference_file.read(cfg.max_upload_bytes + 1)
             if len(content) > cfg.max_upload_bytes:
                 raise HTTPException(status_code=413, detail="Tệp mẫu giọng vượt quá giới hạn.")
             upload_dir = cfg.cache_dir / "uploads"
             upload_dir.mkdir(parents=True, exist_ok=True)
-            reference_path = upload_dir / f"{uuid.uuid4().hex}.wav"
-            reference_path.write_bytes(content)
+            # Save with original extension so soundfile recognises the format
+            raw_path = upload_dir / f"{uuid.uuid4().hex}{suffix}"
+            raw_path.write_bytes(content)
             cleanup_reference = True
+            reference_path = upload_dir / f"{raw_path.stem}.wav"
             try:
+                if suffix != ".wav":
+                    # Convert MP3/OGG/… → WAV before validation
+                    convert_to_wav(raw_path, reference_path)
+                    raw_path.unlink(missing_ok=True)
+                else:
+                    reference_path = raw_path
                 # Allow longer source clips; the engine picks the densest 3–8 s
                 # speech window before enrollment.
                 validate_reference(reference_path, strict_duration=False)

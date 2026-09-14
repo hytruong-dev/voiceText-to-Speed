@@ -966,7 +966,7 @@ async function createJob() {
   if (state.source === "upload" || state.source === "microphone") {
     const file = state.source === "microphone" ? state.microphoneFile : elements.referenceFile.files[0];
     if (!file) {
-      showError(state.source === "microphone" ? "Hãy thu một mẫu mic 6–8 giây trước khi tạo giọng." : "Vui lòng chọn một tệp WAV làm mẫu giọng.");
+      showError(state.source === "microphone" ? "Hãy thu một mẫu mic 6–8 giây trước khi tạo giọng." : "Vui lòng chọn một tệp âm thanh (WAV, MP3, OGG…) làm mẫu giọng.");
       if (state.source === "upload") elements.referenceFile.focus();
       return;
     }
@@ -1084,7 +1084,7 @@ elements.script.addEventListener("blur", () => setTimeout(closeSuggestions, 120)
 elements.speed.addEventListener("input", updateSpeedLabel);
 elements.referenceFile.addEventListener("change", () => {
   const file = elements.referenceFile.files[0];
-  elements.fileLabel.textContent = file ? file.name : "Chọn mẫu WAV 3–60 giây";
+  elements.fileLabel.textContent = file ? file.name : "Chọn mẫu giọng 3–60 giây";
   elements.consent.checked = false;
 });
 elements.microphoneButton.addEventListener("click", toggleMicrophoneCapture);

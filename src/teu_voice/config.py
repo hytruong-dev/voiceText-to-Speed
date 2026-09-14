@@ -67,7 +67,10 @@ class Settings:
         )
     )
     max_upload_bytes: int = (
-        3 * 1024 * 1024 if _IS_SERVERLESS else 20 * 1024 * 1024
+        # 10 MB covers ~5min MP3 @ 128kbps or ~60s WAV 48kHz.
+        # Vercel request body limit is 4.5MB by default — but Fluid Compute
+        # allows larger payloads; 10MB is safe within that envelope.
+        10 * 1024 * 1024 if _IS_SERVERLESS else 20 * 1024 * 1024
     )
     @property
     def lan_enabled(self) -> bool:

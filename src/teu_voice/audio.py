@@ -17,7 +17,7 @@ CLONE_MIN_SECONDS = 3.0
 CLONE_MAX_SECONDS = 8.0
 CLONE_PREFERRED_SECONDS = 7.5
 CLONE_TARGET_PEAK = 10 ** (-3.0 / 20)
-_RAW_UPLOAD_MAX_SECONDS = 60.0
+_RAW_UPLOAD_MAX_SECONDS = 180.0  # allow MP3/long recordings; best window auto-selected
 _SPEECH_ABS_THRESHOLD = 0.010
 _FRAME_MS = 20
 
@@ -66,7 +66,7 @@ def validate_reference(path: Path, *, strict_duration: bool = True) -> AudioInfo
         )
     if not strict_duration and not CLONE_MIN_SECONDS <= info.duration_seconds <= _RAW_UPLOAD_MAX_SECONDS:
         raise AudioValidationError(
-            "Mẫu giọng nên dài từ 3 đến 60 giây; hệ thống sẽ tự chọn cửa sổ 3–8 giây tốt nhất."
+            "Mẫu giọng nên dài từ 3 giây đến 3 phút; hệ thống sẽ tự chọn cửa sổ 6–8 giây tốt nhất."
         )
     return info
 
@@ -123,6 +123,49 @@ def _best_clone_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
             best_score = score
             best_start = start
     return audio[best_start : best_start + window].copy()
+
+
+_SUPPORTED_AUDIO_SUFFIXES = frozenset(
+    {".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".weba", ".webm"}
+)
+
+
+def convert_to_wav(source: Path, destination: Path) -> None:
+    """Convert any supported audio file to 48 kHz mono WAV PCM-16.
+
+    Uses soundfile (libsndfile) which handles WAV, MP3, OGG, FLAC, etc.
+    Falls back to librosa for formats soundfile cannot handle (e.g. some M4A).
+    Raises AudioValidationError on unsupported or corrupt files.
+    """
+    import soundfile as sf
+    import soxr
+
+    try:
+        wav, sr = sf.read(str(source), dtype="float32", always_2d=False)
+    except Exception:  # noqa: BLE001
+        # Fallback: librosa handles a wider range via audioread / ffmpeg if present
+        try:
+            import librosa  # noqa: PLC0415
+
+            wav, sr = librosa.load(str(source), sr=None, mono=False)
+            if wav.ndim > 1:
+                wav = wav.mean(axis=0)
+        except Exception as exc2:  # noqa: BLE001
+            raise AudioValidationError(
+                "Không đọc được tệp âm thanh. Hãy chuyển sang WAV, MP3 hoặc OGG."
+            ) from exc2
+
+    wav = np.asarray(wav, dtype=np.float32)
+    if wav.ndim > 1:
+        wav = np.mean(wav, axis=1, dtype=np.float32)
+    if wav.ndim == 0 or len(wav) == 0:
+        raise AudioValidationError("Tệp âm thanh rỗng hoặc không có dữ liệu.")
+
+    if sr != CLONE_SAMPLE_RATE:
+        wav = np.asarray(soxr.resample(wav, sr, CLONE_SAMPLE_RATE), dtype=np.float32)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(destination), wav, CLONE_SAMPLE_RATE, subtype="PCM_16")
 
 
 def prepare_clone_reference(source: Path, destination: Path) -> AudioInfo:
