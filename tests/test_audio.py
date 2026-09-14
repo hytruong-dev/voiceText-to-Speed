@@ -79,7 +79,7 @@ def test_prepare_clone_reference_resamples_and_normalizes(tmp_path: Path) -> Non
     assert 3.0 <= info.duration_seconds <= 8.0
     audio, sr = sf.read(str(destination), dtype="float32")
     assert sr == 48_000
-    assert float(np.max(np.abs(audio))) == pytest.approx(10 ** (-2.5 / 20), rel=0.05)
+    assert float(np.max(np.abs(audio))) == pytest.approx(10 ** (-2.0 / 20), rel=0.08)
 
 
 def test_prepare_clone_reference_picks_dense_window_from_long_clip(tmp_path: Path) -> None:

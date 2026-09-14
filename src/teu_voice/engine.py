@@ -29,16 +29,20 @@ _MASTER_MAX_MAKEUP_DB = 4.0
 _LIMITER_KNEE = 10 ** (-4.0 / 20)
 # Lower sampling stays closer to the enrolled reference timbre. VieNeu's stock
 # 0.8 default favors variety over identity for zero-shot clones.
-_CLONE_TEMPERATURE = 0.5
-_CLONE_TOP_K = 20
+_CLONE_TEMPERATURE = 0.58
+_CLONE_TOP_K = 18
 _CLONE_TOP_P = 0.9
 _BUILTIN_TEMPERATURE = 0.8
 _PRECLEAN_TOP_DB = 24
 # Serverless (Hobby ~2GB) OOMs when a single ONNX decode is too long; keep chunks tiny.
 _INFER_MAX_CHARS = 64 if _IS_SERVERLESS else 384
-_SERVERLESS_MAX_GROUPS = 20
+_SERVERLESS_MAX_GROUPS = 8
 _SERVERLESS_MAX_GROUP_CHARS = 64
-_SERVERLESS_CLONE_MAX_CHARS = 120
+# Per HTTP job on cloud — UI stitches many of these for ~60s scripts.
+_SERVERLESS_CLONE_MAX_CHARS = 110
+_SERVERLESS_BUILTIN_MAX_CHARS = 220
+_CLONE_EMOTION_PITCH_SCALE = 0.55
+_CLONE_EMOTION_GAIN_SCALE = 0.65
 
 _STYLE_TAGS = {
     "excited": frozenset(
@@ -232,6 +236,8 @@ class _InferenceGroup:
     tag_ids: tuple[str, ...] = ()
     temperatures: tuple[float, ...] = ()
     speed_multipliers: tuple[float, ...] = ()
+    pitch_steps: tuple[float, ...] = ()
+    gain_dbs: tuple[float, ...] = ()
 
 
 def _group_segments_for_natural_delivery(
@@ -250,11 +256,13 @@ def _group_segments_for_natural_delivery(
     current_tag_ids: list[str] = []
     current_temperatures: list[float] = []
     current_speeds: list[float] = []
+    current_pitches: list[float] = []
+    current_gains: list[float] = []
     current_pause_ms = 0
 
     def flush() -> None:
         nonlocal current_text, current_pause_ms, current_tag_ids, current_temperatures
-        nonlocal current_speeds
+        nonlocal current_speeds, current_pitches, current_gains
         if current_text:
             groups.append(
                 _InferenceGroup(
@@ -263,12 +271,16 @@ def _group_segments_for_natural_delivery(
                     tag_ids=tuple(current_tag_ids),
                     temperatures=tuple(current_temperatures),
                     speed_multipliers=tuple(current_speeds),
+                    pitch_steps=tuple(current_pitches),
+                    gain_dbs=tuple(current_gains),
                 )
             )
         current_text = []
         current_tag_ids = []
         current_temperatures = []
         current_speeds = []
+        current_pitches = []
+        current_gains = []
         current_pause_ms = 0
 
     for segment in segments:
@@ -281,6 +293,8 @@ def _group_segments_for_natural_delivery(
         current_tag_ids.extend(segment.tag_ids)
         current_temperatures.append(segment.temperature)
         current_speeds.append(segment.speed_multiplier)
+        current_pitches.append(segment.pitch_steps)
+        current_gains.append(segment.gain_db)
     flush()
     return tuple(groups)
 
@@ -292,6 +306,12 @@ def _group_speed_multiplier(multipliers: Sequence[float]) -> float:
     for value in multipliers:
         product *= value
     return product ** (1.0 / len(multipliers))
+
+
+def _group_mean(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / len(values))
 
 
 def _split_text_by_limit(text: str, max_chars: int) -> list[str]:
@@ -345,6 +365,8 @@ def _prepare_inference_groups(
                     tag_ids=group.tag_ids,
                     temperatures=group.temperatures,
                     speed_multipliers=group.speed_multipliers,
+                    pitch_steps=group.pitch_steps,
+                    gain_dbs=group.gain_dbs,
                 )
             )
     return tuple(shattered)
@@ -366,8 +388,8 @@ def _sampling_temperature(
     # Emotion deltas stay as a soft nudge around the clone base instead of
     # jumping back to VieNeu's expressive 0.8 default.
     average = sum(temperatures) / len(temperatures)
-    nudged = _CLONE_TEMPERATURE + (average - 0.8) * 0.45
-    return round(max(0.42, min(0.62, nudged)), 2)
+    nudged = _CLONE_TEMPERATURE + (average - 0.8) * 0.55
+    return round(max(0.48, min(0.78, nudged)), 2)
 
 
 def _style_for_tags(tag_ids: Sequence[str]) -> str | None:
@@ -700,12 +722,18 @@ class VieneuEngine:
                                 speed * _group_speed_multiplier(group.speed_multipliers),
                             ),
                         )
+                        pitch = _group_mean(group.pitch_steps)
+                        gain = _group_mean(group.gain_dbs)
+                        if cloning:
+                            # Keep emotion audible without washing out clone timbre.
+                            pitch *= _CLONE_EMOTION_PITCH_SCALE
+                            gain *= _CLONE_EMOTION_GAIN_SCALE
                         audio = _safe_audio_effects(
                             audio,
                             sample_rate,
                             speed=effective_speed,
-                            pitch_steps=0.0,
-                            gain_db=0.0,
+                            pitch_steps=pitch,
+                            gain_db=gain,
                             limit_peak=False,
                         )
                         audio = _trim_generated_edges(audio, sample_rate)

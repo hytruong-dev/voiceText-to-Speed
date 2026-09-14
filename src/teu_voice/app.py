@@ -22,6 +22,7 @@ from .engine import (
     MIN_SPEED,
     SpeechEngine,
     VieneuEngine,
+    _SERVERLESS_BUILTIN_MAX_CHARS,
     _SERVERLESS_CLONE_MAX_CHARS,
 )
 from .jobs import JobManager, JobQueueFull
@@ -177,6 +178,9 @@ def create_app(
             },
             "limits": {
                 "max_text_chars": cfg.max_text_chars,
+                "max_job_chars": (
+                    _SERVERLESS_BUILTIN_MAX_CHARS if _IS_SERVERLESS else cfg.max_job_chars
+                ),
                 "max_clone_text_chars": (
                     _SERVERLESS_CLONE_MAX_CHARS if _IS_SERVERLESS else cfg.max_text_chars
                 ),
@@ -184,6 +188,8 @@ def create_app(
                 "speed_min": MIN_SPEED,
                 "speed_max": MAX_SPEED,
                 "speed_default": DEFAULT_SPEED,
+                "long_form": True,
+                "approx_seconds_per_100_chars": 6,
             },
         }
 
@@ -221,10 +227,22 @@ def create_app(
         normalized_text = text.strip()
         if not normalized_text:
             raise HTTPException(status_code=422, detail="Vui lòng nhập nội dung cần đọc.")
-        if len(normalized_text) > cfg.max_text_chars:
+        # Each HTTP job stays inside the cloud memory envelope; the UI stitches
+        # many jobs for long-form (~60s) scripts.
+        job_limit = cfg.max_text_chars
+        if _IS_SERVERLESS:
+            job_limit = (
+                _SERVERLESS_CLONE_MAX_CHARS
+                if reference_mode in {"upload", "provided"}
+                else _SERVERLESS_BUILTIN_MAX_CHARS
+            )
+        if len(normalized_text) > job_limit:
             raise HTTPException(
                 status_code=422,
-                detail=f"Nội dung tối đa {cfg.max_text_chars} ký tự mỗi lượt.",
+                detail=(
+                    f"Mỗi phần tổng hợp tối đa {job_limit} ký tự trên cloud. "
+                    "Ứng dụng sẽ tự chia đoạn dài — hãy refresh trang rồi thử lại."
+                ),
             )
         if builtin_voice not in BUILTIN_VOICES:
             raise HTTPException(status_code=422, detail="Giọng dựng sẵn không hợp lệ.")
@@ -287,20 +305,6 @@ def create_app(
             if cleanup_reference and reference_path is not None:
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=503, detail=detail)
-
-        # Clone enrollment + synthesis barely fits Hobby 2GB; keep scripts short.
-        if _IS_SERVERLESS and reference_path is not None:
-            if len(normalized_text) > _SERVERLESS_CLONE_MAX_CHARS:
-                if cleanup_reference and reference_path is not None:
-                    reference_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Trên cloud, clone giọng chỉ ổn định dưới "
-                        f"{_SERVERLESS_CLONE_MAX_CHARS} ký tự. "
-                        "Hãy rút ngắn nội dung hoặc dùng giọng dựng sẵn."
-                    ),
-                )
 
         # Style codes double reference memory; keep off on Hobby 2GB.
         effective_style_transfer = bool(

@@ -210,15 +210,24 @@ function foldSearch(value) {
 }
 
 function effectiveMaxTextChars() {
+  return state.config?.limits?.max_text_chars || 2000;
+}
+
+function effectiveJobChunkChars() {
   const limits = state.config?.limits || {};
-  const builtinMax = limits.max_text_chars || 2000;
-  if (state.source === "builtin") return builtinMax;
-  return limits.max_clone_text_chars || builtinMax;
+  if (state.source === "builtin") {
+    return limits.max_job_chars || limits.max_text_chars || 2000;
+  }
+  return limits.max_clone_text_chars || limits.max_job_chars || 120;
 }
 
 function updateCharCount() {
   const max = effectiveMaxTextChars();
-  elements.charCount.textContent = `${elements.script.value.length.toLocaleString("vi-VN")} / ${max.toLocaleString("vi-VN")}`;
+  const secondsHint = Math.max(
+    1,
+    Math.round((elements.script.value.length / 100) * (state.config?.limits?.approx_seconds_per_100_chars || 6)),
+  );
+  elements.charCount.textContent = `${elements.script.value.length.toLocaleString("vi-VN")} / ${max.toLocaleString("vi-VN")} · ~${secondsHint}s`;
 }
 
 function formatSpeed(value) {
@@ -455,7 +464,7 @@ function encodeMonoWav(samples, sampleRate) {
 }
 
 function trimAndNormalizeCloneSamples(samples, sampleRate) {
-  const threshold = 0.012;
+  const threshold = 0.01;
   let start = 0;
   let end = samples.length - 1;
   while (start < samples.length && Math.abs(samples[start]) <= threshold) start += 1;
@@ -465,9 +474,31 @@ function trimAndNormalizeCloneSamples(samples, sampleRate) {
   end = Math.min(samples.length - 1, end + guard);
   let trimmed = samples.subarray(start, end + 1);
 
-  const maxSeconds = 7.6;
-  const maxSamples = Math.floor(sampleRate * maxSeconds);
-  if (trimmed.length > maxSamples) trimmed = trimmed.subarray(0, maxSamples);
+  const preferredSeconds = 7.2;
+  const preferredSamples = Math.floor(sampleRate * preferredSeconds);
+  if (trimmed.length > preferredSamples) {
+    const frame = Math.max(1, Math.floor(sampleRate * 0.02));
+    const hop = frame * 2;
+    let bestStart = 0;
+    let bestScore = -1;
+    for (let offset = 0; offset + preferredSamples <= trimmed.length; offset += hop) {
+      let speech = 0;
+      let energy = 0;
+      for (let index = offset; index < offset + preferredSamples; index += frame) {
+        const sample = trimmed[index];
+        const abs = Math.abs(sample);
+        if (abs > threshold) speech += 1;
+        energy += sample * sample;
+      }
+      const frames = Math.ceil(preferredSamples / frame);
+      const score = (speech / frames) * Math.sqrt(energy / frames);
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = offset;
+      }
+    }
+    trimmed = trimmed.subarray(bestStart, bestStart + preferredSamples);
+  }
 
   let peak = 0;
   for (let index = 0; index < trimmed.length; index += 1) {
@@ -480,14 +511,26 @@ function trimAndNormalizeCloneSamples(samples, sampleRate) {
     return { error: "Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng." };
   }
 
-  const targetPeak = 10 ** (-2.5 / 20);
+  const targetPeak = 10 ** (-2.0 / 20);
   const gain = targetPeak / peak;
   const normalized = new Float32Array(trimmed.length);
   for (let index = 0; index < trimmed.length; index += 1) {
     normalized[index] = trimmed[index] * gain;
   }
+  // Mild consonant clarity tilt (matches server prep).
+  for (let index = normalized.length - 1; index >= 1; index -= 1) {
+    normalized[index] += 0.04 * (normalized[index] - normalized[index - 1]);
+  }
+  let tiltPeak = 0;
+  for (let index = 0; index < normalized.length; index += 1) {
+    tiltPeak = Math.max(tiltPeak, Math.abs(normalized[index]));
+  }
+  if (tiltPeak > targetPeak) {
+    const fix = targetPeak / tiltPeak;
+    for (let index = 0; index < normalized.length; index += 1) normalized[index] *= fix;
+  }
 
-  const fade = Math.min(Math.floor(sampleRate * 0.01), Math.floor(normalized.length / 2));
+  const fade = Math.min(Math.floor(sampleRate * 0.006), Math.floor(normalized.length / 2));
   for (let index = 0; index < fade; index += 1) {
     const ramp = index / fade;
     normalized[index] *= ramp;
@@ -632,13 +675,88 @@ function validateText() {
   if (!text) throw new Error("Vui lòng nhập nội dung cần đọc.");
   const max = effectiveMaxTextChars();
   if (text.length > max) {
-    const cloneHint =
-      state.source !== "builtin"
-        ? " (clone/mic trên cloud cần đoạn ngắn hơn)"
-        : "";
-    throw new Error(`Nội dung tối đa ${max.toLocaleString("vi-VN")} ký tự mỗi lượt${cloneHint}.`);
+    throw new Error(`Nội dung tối đa ${max.toLocaleString("vi-VN")} ký tự mỗi lượt (~60–90 giây).`);
   }
   return text;
+}
+
+function splitScriptForJobs(text, maxChars) {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return [];
+  if (cleaned.length <= maxChars) return [cleaned];
+
+  const parts = [];
+  let remaining = cleaned;
+  while (remaining) {
+    if (remaining.length <= maxChars) {
+      parts.push(remaining);
+      break;
+    }
+    const window = remaining.slice(0, maxChars + 1);
+    let splitAt = -1;
+    for (const marker of [". ", "! ", "? ", "; ", ", ", " "]) {
+      const index = window.lastIndexOf(marker);
+      if (index >= Math.max(24, Math.floor(maxChars / 3))) {
+        splitAt = index + marker.length;
+        break;
+      }
+    }
+    const atIndex = window.lastIndexOf("@");
+    if (atIndex > 0 && (splitAt < 0 || atIndex < splitAt) && atIndex >= Math.floor(maxChars * 0.5)) {
+      splitAt = atIndex;
+    }
+    if (splitAt <= 0) splitAt = maxChars;
+    const chunk = remaining.slice(0, splitAt).trim();
+    if (chunk) parts.push(chunk);
+    remaining = remaining.slice(splitAt).trim();
+  }
+  return parts;
+}
+
+async function waitForJobDone(jobId) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    if (!state.jobInFlight) throw new Error("Đã hủy lượt tạo giọng.");
+    const job = await jsonRequest(`/api/jobs/${jobId}`);
+    if (job.status === "done") return job;
+    if (job.status === "error" || job.status === "cancelled") {
+      throw new Error(job.error || "Engine không thể tạo giọng.");
+    }
+    elements.jobStage.textContent = job.stage || "Đang tổng hợp";
+    await new Promise((resolve) => {
+      state.polling = setTimeout(resolve, 900);
+    });
+  }
+  throw new Error("Hết thời gian chờ khi tạo giọng. Hãy thử lại.");
+}
+
+async function fetchJobAudioBuffer(job, audioContext) {
+  const response = await fetch(authorizedUrl(job.audio_url), {
+    headers: state.accessKey ? { "X-Teu-Access-Key": state.accessKey } : {},
+  });
+  if (!response.ok) throw new Error("Không tải được tệp âm thanh vừa tạo.");
+  const data = await response.arrayBuffer();
+  return audioContext.decodeAudioData(data.slice(0));
+}
+
+function concatenateAudioBuffers(audioContext, buffers, gapSeconds = 0.06) {
+  const sampleRate = buffers[0]?.sampleRate || 48000;
+  const gapSamples = Math.max(0, Math.floor(sampleRate * gapSeconds));
+  let total = 0;
+  for (const buffer of buffers) total += buffer.length + gapSamples;
+  total = Math.max(1, total - gapSamples);
+  const output = audioContext.createBuffer(1, total, sampleRate);
+  const channel = output.getChannelData(0);
+  let offset = 0;
+  for (let index = 0; index < buffers.length; index += 1) {
+    channel.set(buffers[index].getChannelData(0), offset);
+    offset += buffers[index].length;
+    if (index < buffers.length - 1) offset += gapSamples;
+  }
+  return output;
+}
+
+function encodeAudioBufferToWav(buffer) {
+  return encodeMonoWav(buffer.getChannelData(0), buffer.sampleRate);
 }
 
 function renderPreviewTags(ids = []) {
@@ -770,14 +888,15 @@ async function previewPerformance() {
   }
 }
 
-function buildJobForm() {
+function buildJobForm(text = elements.script.value) {
   const form = new FormData();
-  form.append("text", elements.script.value);
+  form.append("text", text);
   form.append("speed", elements.speed.value);
   form.append("reference_mode", state.source === "microphone" ? "upload" : state.source);
   form.append("builtin_voice", elements.builtinVoice.value || state.config?.voice_region?.default_builtin || "Adam");
   form.append("denoise", String(elements.denoise.checked));
-  form.append("style_transfer", String(elements.styleTransfer.checked));
+  // Keep style transfer off for clone identity (especially on cloud).
+  form.append("style_transfer", state.source === "builtin" ? String(elements.styleTransfer.checked) : "false");
   form.append("consent", String(elements.consent.checked));
   if (state.source === "upload" && elements.referenceFile.files[0]) {
     form.append("reference_file", elements.referenceFile.files[0]);
@@ -805,16 +924,24 @@ function titleForTags(ids = []) {
   return names.length ? names.join(" + ") : "Bản tự nhiên";
 }
 
-function finishActiveJob(job) {
+function finishActiveJob(job, { audioBlob = null, durationSeconds = null } = {}) {
   if (state.polling) clearTimeout(state.polling);
   state.polling = null;
-  const audioUrl = new URL(authorizedUrl(job.audio_url), window.location.origin);
-  audioUrl.searchParams.set("v", String(Date.now()));
-  elements.resultPlayer.src = `${audioUrl.pathname}${audioUrl.search}`;
-  elements.downloadLink.href = authorizedUrl(job.audio_url);
+  if (audioBlob) {
+    const objectUrl = URL.createObjectURL(audioBlob);
+    elements.resultPlayer.src = objectUrl;
+    elements.downloadLink.href = objectUrl;
+    elements.downloadLink.download = `teu-voice-${Date.now()}.wav`;
+  } else {
+    const audioUrl = new URL(authorizedUrl(job.audio_url), window.location.origin);
+    audioUrl.searchParams.set("v", String(Date.now()));
+    elements.resultPlayer.src = `${audioUrl.pathname}${audioUrl.search}`;
+    elements.downloadLink.href = authorizedUrl(job.audio_url);
+  }
   elements.trackTitle.textContent = titleForTags(job.emotion_tags);
   const styleText = job.effects?.style_transfer ? " · mẫu phong cách" : "";
-  elements.trackMeta.textContent = `${job.duration_seconds.toFixed(2)} giây · ${formatSpeed(job.speed)}×${styleText} · WAV 48 kHz · local`;
+  const duration = Number(durationSeconds ?? job.duration_seconds ?? 0);
+  elements.trackMeta.textContent = `${duration.toFixed(2)} giây · ${formatSpeed(job.speed)}×${styleText} · WAV 48 kHz`;
   state.completedPreview = job;
   state.hasCompletedResult = true;
   state.pendingJob = null;
@@ -827,8 +954,9 @@ function finishActiveJob(job) {
 async function createJob() {
   if (state.jobInFlight) return;
   clearError();
+  let fullText;
   try {
-    validateText();
+    fullText = validateText();
   } catch (error) {
     showError(error.message);
     elements.script.focus();
@@ -854,11 +982,14 @@ async function createJob() {
     }
   }
 
-  state.pendingJob = { speed: Number(elements.speed.value) };
+  const chunks = splitScriptForJobs(fullText, effectiveJobChunkChars());
+  state.pendingJob = { speed: Number(elements.speed.value), chunks: chunks.length };
   state.jobInFlight = true;
   state.pollFailures = 0;
   elements.resultPanel.setAttribute("aria-busy", "true");
-  elements.jobStage.textContent = "Đang gửi kịch bản";
+  elements.jobStage.textContent = chunks.length > 1
+    ? `Đang tạo đoạn dài (${chunks.length} phần)…`
+    : "Đang gửi kịch bản";
   showResult("working");
   syncControls();
   if (window.matchMedia("(max-width: 900px)").matches) {
@@ -866,9 +997,47 @@ async function createJob() {
   }
 
   try {
-    const job = await jsonRequest("/api/jobs", { method: "POST", body: buildJobForm() });
-    state.pendingJob = { ...state.pendingJob, id: job.id };
-    await pollJob(job.id);
+    if (chunks.length === 1) {
+      const job = await jsonRequest("/api/jobs", { method: "POST", body: buildJobForm(chunks[0]) });
+      state.pendingJob = { ...state.pendingJob, id: job.id };
+      if (job.status === "done") {
+        finishActiveJob(job);
+        return;
+      }
+      const done = await waitForJobDone(job.id);
+      finishActiveJob(done);
+      return;
+    }
+
+    const audioContext = new AudioContext({ sampleRate: 48000 });
+    const buffers = [];
+    let lastJob = null;
+    const allTags = [];
+    try {
+      for (let index = 0; index < chunks.length; index += 1) {
+        elements.jobStage.textContent = `Đang tạo phần ${index + 1}/${chunks.length}…`;
+        const job = await jsonRequest("/api/jobs", {
+          method: "POST",
+          body: buildJobForm(chunks[index]),
+        });
+        lastJob = job.status === "done" ? job : await waitForJobDone(job.id);
+        allTags.push(...(lastJob.emotion_tags || []));
+        buffers.push(await fetchJobAudioBuffer(lastJob, audioContext));
+      }
+      const merged = concatenateAudioBuffers(audioContext, buffers);
+      const blob = encodeAudioBufferToWav(merged);
+      finishActiveJob(
+        {
+          ...lastJob,
+          emotion_tags: [...new Set(allTags)],
+          duration_seconds: merged.duration,
+          speed: Number(elements.speed.value),
+        },
+        { audioBlob: blob, durationSeconds: merged.duration },
+      );
+    } finally {
+      audioContext.close();
+    }
   } catch (error) {
     endActiveJobWithError(error.message);
   }

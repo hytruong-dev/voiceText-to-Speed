@@ -55,8 +55,15 @@ class Settings:
     max_text_chars: int = int(
         os.getenv(
             "TEU_VOICE_MAX_TEXT_CHARS",
-            # Cloud Hobby ~2GB: keep scripts short so ONNX decode never SIGKILL 137.
-            "280" if _IS_SERVERLESS else "2000",
+            # Long-form ~60s scripts are accepted in the UI, then auto-chunked
+            # into memory-safe cloud jobs (~110–220 chars each).
+            "1600" if _IS_SERVERLESS else "2000",
+        )
+    )
+    max_job_chars: int = int(
+        os.getenv(
+            "TEU_VOICE_MAX_JOB_CHARS",
+            "220" if _IS_SERVERLESS else "2000",
         )
     )
     max_upload_bytes: int = (

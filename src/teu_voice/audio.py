@@ -15,10 +15,10 @@ class AudioValidationError(ValueError):
 CLONE_SAMPLE_RATE = 48_000
 CLONE_MIN_SECONDS = 3.0
 CLONE_MAX_SECONDS = 8.0
-CLONE_PREFERRED_SECONDS = 7.0
-CLONE_TARGET_PEAK = 10 ** (-2.5 / 20)
+CLONE_PREFERRED_SECONDS = 7.2
+CLONE_TARGET_PEAK = 10 ** (-2.0 / 20)
 _RAW_UPLOAD_MAX_SECONDS = 60.0
-_SPEECH_ABS_THRESHOLD = 0.012
+_SPEECH_ABS_THRESHOLD = 0.010
 _FRAME_MS = 20
 
 
@@ -107,13 +107,18 @@ def _best_clone_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
     frame = max(1, int(sample_rate * _FRAME_MS / 1000))
     window = preferred if preferred <= len(audio) else maximum
     window = min(window, len(audio))
-    hop = frame * 4
+    hop = max(1, frame * 2)
     best_start = 0
     best_score = -1.0
     for start in range(0, len(audio) - window + 1, hop):
         chunk = audio[start : start + window]
-        speech = np.abs(chunk) > _SPEECH_ABS_THRESHOLD
-        score = float(np.mean(speech)) * float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
+        magnitude = np.abs(chunk)
+        speech = magnitude > _SPEECH_ABS_THRESHOLD
+        speech_ratio = float(np.mean(speech))
+        # Prefer continuous speech with rich dynamics (identity lives in formants).
+        rms = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
+        dynamic = float(np.std(chunk, dtype=np.float64))
+        score = speech_ratio * (0.65 * rms + 0.35 * dynamic)
         if score > best_score:
             best_score = score
             best_start = start
@@ -157,7 +162,15 @@ def prepare_clone_reference(source: Path, destination: Path) -> AudioInfo:
         )
 
     wav *= CLONE_TARGET_PEAK / peak
-    wav = _fade_edges(wav, sample_rate, milliseconds=10)
+    # Light high-shelf tilt keeps consonants clear without dulling the timbre.
+    if len(wav) > 8:
+        tilted = wav.copy()
+        tilted[1:] += 0.04 * (wav[1:] - wav[:-1])
+        peak_tilt = float(np.max(np.abs(tilted)))
+        if peak_tilt > 1e-8:
+            tilted *= min(1.0, CLONE_TARGET_PEAK / peak_tilt)
+        wav = tilted
+    wav = _fade_edges(wav, sample_rate, milliseconds=6)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(destination), wav, sample_rate, subtype="PCM_16")

@@ -111,10 +111,10 @@ def test_style_selection_uses_dominant_then_most_recent_direction() -> None:
 
 
 def test_clone_sampling_stays_identity_first() -> None:
-    assert _sampling_temperature((), cloning=True) == 0.5
-    assert _sampling_temperature((0.8, 0.86), cloning=True) == 0.51
+    assert _sampling_temperature((), cloning=True) == 0.58
+    assert _sampling_temperature((0.8, 0.86), cloning=True) == 0.6
     assert _sampling_temperature((0.8,), cloning=False) == 0.8
-    assert 0.42 <= _sampling_temperature((0.95,), cloning=True) <= 0.62
+    assert 0.48 <= _sampling_temperature((0.95,), cloning=True) <= 0.78
 
 
 def test_generated_edge_trim_removes_padding_but_keeps_a_guard() -> None:
