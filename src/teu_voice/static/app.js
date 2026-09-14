@@ -431,6 +431,11 @@ function updateSource(source, { resetConsent = true } = {}) {
   elements.denoiseRow.hidden = !isClone;
   elements.denoise.checked = false;
   if (resetConsent && changed) elements.consent.checked = false;
+  if (isClone) {
+    // Speed DSP warps clone timbre; keep near natural reading rate.
+    elements.speed.value = "1";
+    updateSpeedLabel();
+  }
   if (state.config?.limits) {
     elements.script.maxLength = effectiveMaxTextChars();
   }
@@ -474,7 +479,7 @@ function trimAndNormalizeCloneSamples(samples, sampleRate) {
   end = Math.min(samples.length - 1, end + guard);
   let trimmed = samples.subarray(start, end + 1);
 
-  const preferredSeconds = 7.2;
+  const preferredSeconds = 7.5;
   const preferredSamples = Math.floor(sampleRate * preferredSeconds);
   if (trimmed.length > preferredSamples) {
     const frame = Math.max(1, Math.floor(sampleRate * 0.02));
@@ -511,26 +516,15 @@ function trimAndNormalizeCloneSamples(samples, sampleRate) {
     return { error: "Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng." };
   }
 
-  const targetPeak = 10 ** (-2.0 / 20);
+  // Keep natural timbre — no EQ. Only gentle peak match for enrollment.
+  const targetPeak = 10 ** (-3.0 / 20);
   const gain = targetPeak / peak;
   const normalized = new Float32Array(trimmed.length);
   for (let index = 0; index < trimmed.length; index += 1) {
     normalized[index] = trimmed[index] * gain;
   }
-  // Mild consonant clarity tilt (matches server prep).
-  for (let index = normalized.length - 1; index >= 1; index -= 1) {
-    normalized[index] += 0.04 * (normalized[index] - normalized[index - 1]);
-  }
-  let tiltPeak = 0;
-  for (let index = 0; index < normalized.length; index += 1) {
-    tiltPeak = Math.max(tiltPeak, Math.abs(normalized[index]));
-  }
-  if (tiltPeak > targetPeak) {
-    const fix = targetPeak / tiltPeak;
-    for (let index = 0; index < normalized.length; index += 1) normalized[index] *= fix;
-  }
 
-  const fade = Math.min(Math.floor(sampleRate * 0.006), Math.floor(normalized.length / 2));
+  const fade = Math.min(Math.floor(sampleRate * 0.004), Math.floor(normalized.length / 2));
   for (let index = 0; index < fade; index += 1) {
     const ramp = index / fade;
     normalized[index] *= ramp;
@@ -891,12 +885,14 @@ async function previewPerformance() {
 function buildJobForm(text = elements.script.value) {
   const form = new FormData();
   form.append("text", text);
-  form.append("speed", elements.speed.value);
+  const isClone = state.source !== "builtin";
+  // Clone timbre is ruined by rate-change DSP; keep near 1.0×.
+  form.append("speed", isClone ? "1" : elements.speed.value);
   form.append("reference_mode", state.source === "microphone" ? "upload" : state.source);
   form.append("builtin_voice", elements.builtinVoice.value || state.config?.voice_region?.default_builtin || "Adam");
-  form.append("denoise", String(elements.denoise.checked));
+  form.append("denoise", "false");
   // Keep style transfer off for clone identity (especially on cloud).
-  form.append("style_transfer", state.source === "builtin" ? String(elements.styleTransfer.checked) : "false");
+  form.append("style_transfer", isClone ? "false" : String(elements.styleTransfer.checked));
   form.append("consent", String(elements.consent.checked));
   if (state.source === "upload" && elements.referenceFile.files[0]) {
     form.append("reference_file", elements.referenceFile.files[0]);

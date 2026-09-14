@@ -15,8 +15,8 @@ class AudioValidationError(ValueError):
 CLONE_SAMPLE_RATE = 48_000
 CLONE_MIN_SECONDS = 3.0
 CLONE_MAX_SECONDS = 8.0
-CLONE_PREFERRED_SECONDS = 7.2
-CLONE_TARGET_PEAK = 10 ** (-2.0 / 20)
+CLONE_PREFERRED_SECONDS = 7.5
+CLONE_TARGET_PEAK = 10 ** (-3.0 / 20)
 _RAW_UPLOAD_MAX_SECONDS = 60.0
 _SPEECH_ABS_THRESHOLD = 0.010
 _FRAME_MS = 20
@@ -162,15 +162,8 @@ def prepare_clone_reference(source: Path, destination: Path) -> AudioInfo:
         )
 
     wav *= CLONE_TARGET_PEAK / peak
-    # Light high-shelf tilt keeps consonants clear without dulling the timbre.
-    if len(wav) > 8:
-        tilted = wav.copy()
-        tilted[1:] += 0.04 * (wav[1:] - wav[:-1])
-        peak_tilt = float(np.max(np.abs(tilted)))
-        if peak_tilt > 1e-8:
-            tilted *= min(1.0, CLONE_TARGET_PEAK / peak_tilt)
-        wav = tilted
-    wav = _fade_edges(wav, sample_rate, milliseconds=6)
+    # Do not EQ/tilt the reference — formants are the clone identity.
+    wav = _fade_edges(wav, sample_rate, milliseconds=4)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(destination), wav, sample_rate, subtype="PCM_16")

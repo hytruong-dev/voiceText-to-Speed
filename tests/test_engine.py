@@ -28,7 +28,7 @@ def test_reference_temp_is_redirected_inside_project(tmp_path: Path) -> None:
     class FakeModel:
         @staticmethod
         def _preclean_reference_audio(ref_audio, *, top_db=24, out_path=None):
-            assert top_db == 24
+            assert top_db == 28
             path = Path(out_path)
             path.write_bytes(Path(ref_audio).read_bytes())
             return str(path)
@@ -111,10 +111,10 @@ def test_style_selection_uses_dominant_then_most_recent_direction() -> None:
 
 
 def test_clone_sampling_stays_identity_first() -> None:
-    assert _sampling_temperature((), cloning=True) == 0.58
-    assert _sampling_temperature((0.8, 0.86), cloning=True) == 0.6
+    assert _sampling_temperature((), cloning=True) == 0.78
+    assert _sampling_temperature((0.8, 0.86), cloning=True) == 0.79
     assert _sampling_temperature((0.8,), cloning=False) == 0.8
-    assert 0.48 <= _sampling_temperature((0.95,), cloning=True) <= 0.78
+    assert 0.70 <= _sampling_temperature((0.95,), cloning=True) <= 0.88
 
 
 def test_generated_edge_trim_removes_padding_but_keeps_a_guard() -> None:

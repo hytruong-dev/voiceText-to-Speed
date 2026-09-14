@@ -27,22 +27,22 @@ _EDGE_TRIM_GUARD_MS = 24
 _MASTER_TARGET_RMS_DB = -16.5
 _MASTER_MAX_MAKEUP_DB = 4.0
 _LIMITER_KNEE = 10 ** (-4.0 / 20)
-# Lower sampling stays closer to the enrolled reference timbre. VieNeu's stock
-# 0.8 default favors variety over identity for zero-shot clones.
-_CLONE_TEMPERATURE = 0.58
-_CLONE_TOP_K = 18
-_CLONE_TOP_P = 0.9
+# Clone identity comes from speaker_emb + ref_codes. VieNeu's stock defaults
+# (temp≈0.8, top_k=25) keep natural Vietnamese prosody; over-lowering temp
+# flattens “nhấn nhá”, while pitch/speed DSP warps the enrolled timbre.
+_CLONE_TEMPERATURE = 0.78
+_CLONE_TOP_K = 25
+_CLONE_TOP_P = 0.95
+_CLONE_REPETITION_PENALTY = 1.2
 _BUILTIN_TEMPERATURE = 0.8
-_PRECLEAN_TOP_DB = 24
-# Serverless (Hobby ~2GB) OOMs when a single ONNX decode is too long; keep chunks tiny.
-_INFER_MAX_CHARS = 64 if _IS_SERVERLESS else 384
-_SERVERLESS_MAX_GROUPS = 8
-_SERVERLESS_MAX_GROUP_CHARS = 64
+_PRECLEAN_TOP_DB = 28
+# Serverless (Hobby ~2GB) OOMs above ~200 chars/decode; keep under that.
+_INFER_MAX_CHARS = 100 if _IS_SERVERLESS else 384
+_SERVERLESS_MAX_GROUPS = 6
+_SERVERLESS_MAX_GROUP_CHARS = 100
 # Per HTTP job on cloud — UI stitches many of these for ~60s scripts.
-_SERVERLESS_CLONE_MAX_CHARS = 110
+_SERVERLESS_CLONE_MAX_CHARS = 140
 _SERVERLESS_BUILTIN_MAX_CHARS = 220
-_CLONE_EMOTION_PITCH_SCALE = 0.55
-_CLONE_EMOTION_GAIN_SCALE = 0.65
 
 _STYLE_TAGS = {
     "excited": frozenset(
@@ -385,11 +385,10 @@ def _sampling_temperature(
         return _BUILTIN_TEMPERATURE
     if not temperatures:
         return _CLONE_TEMPERATURE
-    # Emotion deltas stay as a soft nudge around the clone base instead of
-    # jumping back to VieNeu's expressive 0.8 default.
+    # Soft nudge only — stay near VieNeu's natural-prosody band.
     average = sum(temperatures) / len(temperatures)
-    nudged = _CLONE_TEMPERATURE + (average - 0.8) * 0.55
-    return round(max(0.48, min(0.78, nudged)), 2)
+    nudged = _CLONE_TEMPERATURE + (average - 0.8) * 0.35
+    return round(max(0.70, min(0.88, nudged)), 2)
 
 
 def _style_for_tags(tag_ids: Sequence[str]) -> str | None:
@@ -703,31 +702,39 @@ class VieneuEngine:
                             group.temperatures,
                             cloning=cloning and style_codes is None,
                         )
-                        audio = model.infer(
-                            group.engine_text,
-                            voice=voice,
-                            temperature=temperature,
-                            top_k=_CLONE_TOP_K if cloning else 25,
-                            top_p=_CLONE_TOP_P if cloning else 0.95,
-                            max_chars=_INFER_MAX_CHARS,
-                            apply_watermark=False,
-                        )
+                        infer_kwargs: dict[str, object] = {
+                            "voice": voice,
+                            "temperature": temperature,
+                            "top_k": _CLONE_TOP_K if cloning else 25,
+                            "top_p": _CLONE_TOP_P if cloning else 0.95,
+                            "max_chars": _INFER_MAX_CHARS,
+                            "apply_watermark": False,
+                        }
+                        if cloning:
+                            # Match VieNeu defaults so prosody stays in the
+                            # reference's natural reading style.
+                            infer_kwargs["repetition_penalty"] = _CLONE_REPETITION_PENALTY
+                            infer_kwargs["denoise"] = False
+                        audio = model.infer(group.engine_text, **infer_kwargs)
                         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
                         if not len(audio):
                             raise RuntimeError("Engine trả về một đoạn âm thanh rỗng.")
-                        effective_speed = max(
-                            _MIN_EFFECTIVE_SPEED,
-                            min(
-                                _MAX_EFFECTIVE_SPEED,
-                                speed * _group_speed_multiplier(group.speed_multipliers),
-                            ),
-                        )
-                        pitch = _group_mean(group.pitch_steps)
-                        gain = _group_mean(group.gain_dbs)
                         if cloning:
-                            # Keep emotion audible without washing out clone timbre.
-                            pitch *= _CLONE_EMOTION_PITCH_SCALE
-                            gain *= _CLONE_EMOTION_GAIN_SCALE
+                            # Pitch/speed DSP changes formants and kills identity.
+                            # Emotion for clones = native cues + punctuation only.
+                            effective_speed = max(0.97, min(1.03, speed))
+                            pitch = 0.0
+                            gain = 0.0
+                        else:
+                            effective_speed = max(
+                                _MIN_EFFECTIVE_SPEED,
+                                min(
+                                    _MAX_EFFECTIVE_SPEED,
+                                    speed * _group_speed_multiplier(group.speed_multipliers),
+                                ),
+                            )
+                            pitch = _group_mean(group.pitch_steps)
+                            gain = _group_mean(group.gain_dbs)
                         audio = _safe_audio_effects(
                             audio,
                             sample_rate,
