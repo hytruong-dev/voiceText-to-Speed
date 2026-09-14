@@ -578,6 +578,39 @@ class VieneuEngine:
                             f"— denoiser disabled to conserve /tmp space",
                             flush=True,
                         )
+                        # Disable ONNX Runtime CPU memory arenas on serverless.
+                        # Arenas retain freed buffers indefinitely, which pushes
+                        # peak RSS past the 2GB Vercel limit during cold-start
+                        # clone requests (SIGKILL 137). Slightly slower, but the
+                        # process stays alive.
+                        try:
+                            import onnxruntime as ort
+
+                            if not getattr(ort, "_teu_lowmem_patched", False):
+                                _OrigSessionOptions = ort.SessionOptions
+                                _OrigInferenceSession = ort.InferenceSession
+
+                                class _LowMemSessionOptions(_OrigSessionOptions):
+                                    def __init__(self) -> None:
+                                        super().__init__()
+                                        self.enable_cpu_mem_arena = False
+
+                                def _lowmem_session(path_or_bytes, sess_options=None, *a, **kw):
+                                    if sess_options is None:
+                                        sess_options = _LowMemSessionOptions()
+                                    return _OrigInferenceSession(
+                                        path_or_bytes, sess_options, *a, **kw
+                                    )
+
+                                ort.SessionOptions = _LowMemSessionOptions
+                                ort.InferenceSession = _lowmem_session
+                                ort._teu_lowmem_patched = True
+                                print(
+                                    "🧠 ORT low-memory mode: CPU arenas disabled",
+                                    flush=True,
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
                     else:
                         print(
                             f"⏳ Loading VieNeu-TTS v3 Turbo (ONNX/{precision.upper()})",
@@ -772,6 +805,19 @@ class VieneuEngine:
                         "speaker_emb": speaker_emb,
                         "codes": ref_codes,
                     }
+                    if _IS_SERVERLESS:
+                        # Enrollment is done — release the speaker encoder and
+                        # codec-encoder ONNX sessions so their weights/arenas
+                        # don't stack on top of synthesis memory (2GB limit).
+                        engine = getattr(model, "engine", None)
+                        if engine is not None:
+                            if getattr(engine, "speaker_encoder", None) is not None:
+                                engine.speaker_encoder = None
+                            if getattr(engine, "_sess_codec_enc", None) is not None:
+                                engine._sess_codec_enc = None
+                        import gc
+
+                        gc.collect()
                 else:
                     base_voice = builtin_voice
 
