@@ -34,6 +34,7 @@ packages = ["src/teu_voice"]
 
 [tool.hatch.build.targets.wheel.include]
 "src/teu_voice/custom_voices.json" = "teu_voice/custom_voices.json"
+"src/teu_voice/style_codes.json" = "teu_voice/style_codes.json"
 
 
 [tool.vercel]

@@ -107,7 +107,9 @@ def test_semantic_tags_share_context_until_an_explicit_pause() -> None:
 def test_style_selection_uses_dominant_then_most_recent_direction() -> None:
     assert _style_for_tags(("funny", "chuckle", "excited")) == "funny"
     assert _style_for_tags(("funny", "excited")) == "excited"
-    assert _style_for_tags(("calm", "slow")) is None
+    assert _style_for_tags(("calm", "slow")) == "calm"
+    assert _style_for_tags(("warm", "soft")) == "warm"
+    assert _style_for_tags(("pause_short",)) is None
 
 
 def test_clone_sampling_stays_identity_first() -> None:

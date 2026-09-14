@@ -6,6 +6,7 @@ import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -52,13 +53,9 @@ _STYLE_TAGS = {
             "delighted",
             "giddy",
             "amazed",
-            "curious",
             "surprised",
             "mock_gasp",
             "dramatic",
-            "nervous",
-            "scared",
-            "angry",
             "shout",
             "rushed",
             "gasp",
@@ -79,6 +76,27 @@ _STYLE_TAGS = {
             "laugh_loud",
             "hearty_laugh",
             "burst_laugh",
+            "curious",
+        }
+    ),
+    "calm": frozenset(
+        {
+            "calm",
+            "slow",
+            "confident",
+            "hesitate",
+            "drawn_out",
+            "nervous",
+        }
+    ),
+    "warm": frozenset(
+        {
+            "warm",
+            "soft",
+            "whisper",
+            "sad",
+            "emotional",
+            "scared",
         }
     ),
 }
@@ -391,6 +409,30 @@ def _sampling_temperature(
     return round(max(0.70, min(0.88, nudged)), 2)
 
 
+@lru_cache(maxsize=1)
+def _bundled_style_codes() -> dict[str, list]:
+    """Load precomputed style-transfer ref codes bundled with the package.
+
+    Generated offline from expressive segments of the source recording, so
+    style transfer works on Vercel without any audio processing at runtime.
+    """
+    import json
+
+    path = Path(__file__).resolve().parent / "style_codes.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        styles = payload.get("styles") or {}
+        return {
+            name: meta["codes"]
+            for name, meta in styles.items()
+            if isinstance(meta, dict) and meta.get("codes")
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _style_for_tags(tag_ids: Sequence[str]) -> str | None:
     """Pick the dominant available performance reference for one group."""
 
@@ -498,9 +540,12 @@ class VieneuEngine:
 
     @property
     def style_reference_names(self) -> tuple[str, ...]:
+        bundled = _bundled_style_codes()
         style_dir = self.settings.data_dir / "style_references"
         return tuple(
-            name for name in _STYLE_TAGS if (style_dir / f"{name}.wav").is_file()
+            name
+            for name in _STYLE_TAGS
+            if name in bundled or (style_dir / f"{name}.wav").is_file()
         )
 
     def availability(self) -> tuple[bool, str]:
@@ -669,13 +714,22 @@ class VieneuEngine:
     def _get_style_codes(self, model, style_name: str) -> np.ndarray | None:
         if style_name in self._style_codes:
             return self._style_codes[style_name]
+        # A local WAV in data/style_references overrides the bundled codes so
+        # users can swap in their own performance samples.
         path = self.settings.data_dir / "style_references" / f"{style_name}.wav"
-        if not path.is_file():
-            self._style_codes[style_name] = None
-            return None
-        _, codes = model._resolve_ref(None, str(path), False, True)
-        self._style_codes[style_name] = codes
-        return codes
+        if path.is_file():
+            _, codes = model._resolve_ref(None, str(path), False, True)
+            self._style_codes[style_name] = codes
+            return codes
+        # Fall back to precomputed codes bundled with the package (works on
+        # Vercel where audio processing at runtime is too expensive).
+        bundled = _bundled_style_codes()
+        if style_name in bundled:
+            codes = np.asarray(bundled[style_name])
+            self._style_codes[style_name] = codes
+            return codes
+        self._style_codes[style_name] = None
+        return None
 
     def synthesize(
         self,
@@ -791,6 +845,19 @@ class VieneuEngine:
                             effective_speed = max(0.97, min(1.03, speed))
                             pitch = 0.0
                             gain = 0.0
+                        elif style_codes is not None:
+                            # Real expressive reference already carries the
+                            # emotion — skip pitch DSP (formant distortion) and
+                            # keep only gentle speed/gain shaping.
+                            effective_speed = max(
+                                _MIN_EFFECTIVE_SPEED,
+                                min(
+                                    _MAX_EFFECTIVE_SPEED,
+                                    speed * _group_speed_multiplier(group.speed_multipliers),
+                                ),
+                            )
+                            pitch = 0.0
+                            gain = _group_mean(group.gain_dbs) * 0.5
                         else:
                             effective_speed = max(
                                 _MIN_EFFECTIVE_SPEED,
@@ -799,7 +866,10 @@ class VieneuEngine:
                                     speed * _group_speed_multiplier(group.speed_multipliers),
                                 ),
                             )
-                            pitch = _group_mean(group.pitch_steps)
+                            # Restrained pitch DSP: resample-based shifting
+                            # distorts formants fast, so cap it tighter than
+                            # the raw tag sums.
+                            pitch = max(-0.5, min(0.5, _group_mean(group.pitch_steps)))
                             gain = _group_mean(group.gain_dbs)
                         audio = _safe_audio_effects(
                             audio,

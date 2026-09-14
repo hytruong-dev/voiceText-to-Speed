@@ -174,7 +174,9 @@ def create_app(
             "style_transfer": {
                 "available": bool(style_names),
                 "styles": list(style_names),
-                "default": False,
+                # Expressive-by-default: tags switch to real performance
+                # references extracted from the source recording.
+                "default": True,
             },
             "builtin_voices": [voice.to_dict() for voice in list_builtin_voices()],
             "voice_region": {
@@ -325,10 +327,9 @@ def create_app(
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=503, detail=detail)
 
-        # Style codes double reference memory; keep off on Hobby 2GB.
-        effective_style_transfer = bool(
-            style_transfer and current_style_names() and not _IS_SERVERLESS
-        )
+        # Style codes are precomputed and bundled (style_codes.json), so style
+        # transfer is safe on serverless too — no runtime audio processing.
+        effective_style_transfer = bool(style_transfer and current_style_names())
         # Denoiser weights are skipped on serverless loads; never request them.
         effective_denoise = bool(denoise) and not _IS_SERVERLESS
         try:

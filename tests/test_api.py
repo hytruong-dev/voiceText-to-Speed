@@ -80,7 +80,8 @@ def test_config_and_preview(tmp_path: Path) -> None:
         assert config["reference"]["duration_seconds"] == 4.0
         assert "styles" not in config
         assert config["style_transfer"]["available"] is False
-        assert config["style_transfer"]["default"] is False
+        # Expressive-by-default: the UI only honors this when styles exist.
+        assert config["style_transfer"]["default"] is True
         assert len(config["emotion_tags"]) >= 40
         assert config["limits"]["speed_min"] == 0.75
         assert config["limits"]["speed_max"] == 1.35
@@ -102,7 +103,7 @@ def test_config_and_preview(tmp_path: Path) -> None:
         assert "engine_text" not in payload
 
 
-def test_style_transfer_defaults_off_even_when_references_exist(tmp_path: Path) -> None:
+def test_style_transfer_defaults_on_when_references_exist(tmp_path: Path) -> None:
     cfg = settings_for(tmp_path)
     engine = FakeStyleEngine()
     app = create_app(cfg, engine)
@@ -111,7 +112,7 @@ def test_style_transfer_defaults_off_even_when_references_exist(tmp_path: Path) 
         assert config["style_transfer"] == {
             "available": True,
             "styles": ["excited", "funny"],
-            "default": False,
+            "default": True,
         }
 
         response = client.post(
