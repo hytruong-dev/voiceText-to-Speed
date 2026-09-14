@@ -14,27 +14,24 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .audio import AudioValidationError, inspect_wav, validate_reference
-from .config import Settings, is_loopback_host, settings as default_settings
+from .config import Settings, _IS_SERVERLESS, is_loopback_host, settings as default_settings
 from .emotions import compile_emotion_script, tag_catalog
-from .engine import DEFAULT_SPEED, MAX_SPEED, MIN_SPEED, SpeechEngine, VieneuEngine
+from .engine import (
+    DEFAULT_SPEED,
+    MAX_SPEED,
+    MIN_SPEED,
+    SpeechEngine,
+    VieneuEngine,
+    _SERVERLESS_BUILTIN_MAX_CHARS,
+    _SERVERLESS_CLONE_MAX_CHARS,
+)
 from .jobs import JobManager, JobQueueFull
+from .voices import builtin_voice_ids, default_builtin_voice, list_builtin_voices, preferred_region
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-BUILTIN_VOICES = (
-    "Adam",
-    "Phạm Tuyên",
-    "Minh Đức",
-    "Trúc Ly",
-    "Mai Anh",
-    "Quỳnh Anh",
-    "Quang Sơn",
-    "Ngọc Trân",
-    "Xuân Vĩnh",
-    "Thái Sơn",
-    "Thùy Dung",
-    "Mỹ Duyên",
-)
+BUILTIN_VOICES = builtin_voice_ids()
+DEFAULT_BUILTIN_VOICE = default_builtin_voice()
 
 
 class PreviewRequest(BaseModel):
@@ -173,13 +170,26 @@ def create_app(
                 "styles": list(style_names),
                 "default": False,
             },
-            "builtin_voices": list(BUILTIN_VOICES),
+            "builtin_voices": [voice.to_dict() for voice in list_builtin_voices()],
+            "voice_region": {
+                "preferred": preferred_region(),
+                "default_builtin": DEFAULT_BUILTIN_VOICE,
+                "detail": "Ưu tiên giọng miền Nam / Sài Gòn cho giọng dựng sẵn.",
+            },
             "limits": {
                 "max_text_chars": cfg.max_text_chars,
+                "max_job_chars": (
+                    _SERVERLESS_BUILTIN_MAX_CHARS if _IS_SERVERLESS else cfg.max_job_chars
+                ),
+                "max_clone_text_chars": (
+                    _SERVERLESS_CLONE_MAX_CHARS if _IS_SERVERLESS else cfg.max_text_chars
+                ),
                 "max_upload_mb": cfg.max_upload_bytes // (1024 * 1024),
                 "speed_min": MIN_SPEED,
                 "speed_max": MAX_SPEED,
                 "speed_default": DEFAULT_SPEED,
+                "long_form": True,
+                "approx_seconds_per_100_chars": 6,
             },
         }
 
@@ -208,7 +218,7 @@ def create_app(
         text: Annotated[str, Form()],
         speed: Annotated[float, Form(ge=MIN_SPEED, le=MAX_SPEED)] = DEFAULT_SPEED,
         reference_mode: Annotated[str, Form()] = "provided",
-        builtin_voice: Annotated[str, Form()] = "Adam",
+        builtin_voice: Annotated[str, Form()] = DEFAULT_BUILTIN_VOICE,
         denoise: Annotated[bool, Form()] = False,
         style_transfer: Annotated[bool, Form()] = False,
         consent: Annotated[bool, Form()] = False,
@@ -217,10 +227,22 @@ def create_app(
         normalized_text = text.strip()
         if not normalized_text:
             raise HTTPException(status_code=422, detail="Vui lòng nhập nội dung cần đọc.")
-        if len(normalized_text) > cfg.max_text_chars:
+        # Each HTTP job stays inside the cloud memory envelope; the UI stitches
+        # many jobs for long-form (~60s) scripts.
+        job_limit = cfg.max_text_chars
+        if _IS_SERVERLESS:
+            job_limit = (
+                _SERVERLESS_CLONE_MAX_CHARS
+                if reference_mode in {"upload", "provided"}
+                else _SERVERLESS_BUILTIN_MAX_CHARS
+            )
+        if len(normalized_text) > job_limit:
             raise HTTPException(
                 status_code=422,
-                detail=f"Nội dung tối đa {cfg.max_text_chars} ký tự mỗi lượt.",
+                detail=(
+                    f"Mỗi phần tổng hợp tối đa {job_limit} ký tự trên cloud. "
+                    "Ứng dụng sẽ tự chia đoạn dài — hãy refresh trang rồi thử lại."
+                ),
             )
         if builtin_voice not in BUILTIN_VOICES:
             raise HTTPException(status_code=422, detail="Giọng dựng sẵn không hợp lệ.")
@@ -261,7 +283,9 @@ def create_app(
             reference_path.write_bytes(content)
             cleanup_reference = True
             try:
-                validate_reference(reference_path)
+                # Allow longer source clips; the engine picks the densest 3–8 s
+                # speech window before enrollment.
+                validate_reference(reference_path, strict_duration=False)
             except AudioValidationError as exc:
                 reference_path.unlink(missing_ok=True)
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -270,7 +294,7 @@ def create_app(
 
         if reference_path is not None:
             try:
-                validate_reference(reference_path)
+                validate_reference(reference_path, strict_duration=False)
             except AudioValidationError as exc:
                 if cleanup_reference:
                     reference_path.unlink(missing_ok=True)
@@ -282,7 +306,12 @@ def create_app(
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=503, detail=detail)
 
-        effective_style_transfer = bool(style_transfer and current_style_names())
+        # Style codes double reference memory; keep off on Hobby 2GB.
+        effective_style_transfer = bool(
+            style_transfer and current_style_names() and not _IS_SERVERLESS
+        )
+        # Denoiser weights are skipped on serverless loads; never request them.
+        effective_denoise = bool(denoise) and not _IS_SERVERLESS
         try:
             job = manager.submit(
                 text=normalized_text,
@@ -293,7 +322,7 @@ def create_app(
                 speed=speed,
                 reference_path=reference_path,
                 builtin_voice=builtin_voice,
-                denoise=denoise,
+                denoise=effective_denoise,
                 style_transfer=effective_style_transfer,
                 cleanup_reference=cleanup_reference,
             )
@@ -301,9 +330,38 @@ def create_app(
             if cleanup_reference and reference_path is not None:
                 reference_path.unlink(missing_ok=True)
             raise HTTPException(status_code=429, detail=str(exc)) from exc
-        from .jobs import _IS_SERVERLESS as _SL
-        return manager.get_public(job.id) or job.public_dict(include_audio=_SL)
+        except MemoryError as exc:
+            if cleanup_reference and reference_path is not None:
+                reference_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Máy chủ cloud hết bộ nhớ khi dựng đoạn dài. "
+                    "Hãy rút ngắn nội dung (khoảng dưới 250 ký tự), "
+                    "dùng giọng dựng sẵn, rồi thử lại."
+                ),
+            ) from exc
+        except ValueError as exc:
+            if cleanup_reference and reference_path is not None:
+                reference_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - never leak a bare 500 to the UI
+            if cleanup_reference and reference_path is not None:
+                reference_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Không tạo được giọng lúc này: {str(exc)[:240]}",
+            ) from exc
 
+        payload = manager.get_public(job.id) or job.public_dict()
+        # Serverless runs synthesis inside this request; surface failures as HTTP errors
+        # so the browser does not treat a completed-but-failed job as success.
+        if payload.get("status") == "error":
+            raise HTTPException(
+                status_code=503,
+                detail=str(payload.get("error") or "Engine gặp lỗi khi tạo giọng."),
+            )
+        return payload
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, object]:
         job = manager.get_public(job_id)

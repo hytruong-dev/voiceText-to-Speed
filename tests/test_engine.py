@@ -10,6 +10,7 @@ from teu_voice.engine import (
     _group_segments_for_natural_delivery,
     _master_speech,
     _safe_audio_effects,
+    _sampling_temperature,
     _style_for_tags,
     _trim_generated_edges,
 )
@@ -26,8 +27,8 @@ def test_reference_temp_is_redirected_inside_project(tmp_path: Path) -> None:
 
     class FakeModel:
         @staticmethod
-        def _preclean_reference_audio(ref_audio, *, top_db=30, out_path=None):
-            assert top_db == 30
+        def _preclean_reference_audio(ref_audio, *, top_db=24, out_path=None):
+            assert top_db == 28
             path = Path(out_path)
             path.write_bytes(Path(ref_audio).read_bytes())
             return str(path)
@@ -109,6 +110,13 @@ def test_style_selection_uses_dominant_then_most_recent_direction() -> None:
     assert _style_for_tags(("calm", "slow")) is None
 
 
+def test_clone_sampling_stays_identity_first() -> None:
+    assert _sampling_temperature((), cloning=True) == 0.78
+    assert _sampling_temperature((0.8, 0.86), cloning=True) == 0.79
+    assert _sampling_temperature((0.8,), cloning=False) == 0.8
+    assert 0.70 <= _sampling_temperature((0.95,), cloning=True) <= 0.88
+
+
 def test_generated_edge_trim_removes_padding_but_keeps_a_guard() -> None:
     sample_rate = 48_000
     padding = np.zeros(round(sample_rate * 0.25), dtype=np.float32)
@@ -162,7 +170,7 @@ def test_vieneu_engine_infers_continuously_between_explicit_pauses(tmp_path: Pat
         def __init__(self) -> None:
             self.calls: list[tuple[str, str, float]] = []
 
-        def infer(self, text: str, *, voice: str, temperature: float) -> np.ndarray:
+        def infer(self, text: str, *, voice: str, temperature: float, **kwargs) -> np.ndarray:
             self.calls.append((text, voice, temperature))
             timeline = np.arange(4_800, dtype=np.float32) / self.sample_rate
             speech = (0.1 * np.sin(2 * np.pi * 180 * timeline)).astype(np.float32)
@@ -224,7 +232,7 @@ def test_style_transfer_combines_base_speaker_with_emotional_codes(tmp_path: Pat
             assert voice == "Adam"
             return np.array([1.0]), np.array([11])
 
-        def infer(self, text: str, *, voice: object, temperature: float) -> np.ndarray:
+        def infer(self, text: str, *, voice: object, temperature: float, **kwargs) -> np.ndarray:
             self.voice = voice
             return np.full(4_800, 0.05, dtype=np.float32)
 

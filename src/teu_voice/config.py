@@ -47,12 +47,28 @@ class Settings:
         "TEU_VOICE_PRECISION",
         "int8" if _IS_SERVERLESS else "fp32",
     ).lower()
+    # Bias builtin presets toward Saigon/Southern Vietnamese by default.
+    voice_region: str = os.getenv("TEU_VOICE_REGION", "nam").lower()
     host: str = os.getenv("TEU_VOICE_HOST", "127.0.0.1")
     access_key: str | None = os.getenv("TEU_VOICE_ACCESS_KEY") or None
     ngrok_host: str | None = os.getenv("TEU_VOICE_NGROK_HOST") or None
-    max_text_chars: int = 2_000
-    max_upload_bytes: int = 20 * 1024 * 1024
-
+    max_text_chars: int = int(
+        os.getenv(
+            "TEU_VOICE_MAX_TEXT_CHARS",
+            # Long-form ~60s scripts are accepted in the UI, then auto-chunked
+            # into memory-safe cloud jobs (~110–220 chars each).
+            "1600" if _IS_SERVERLESS else "2000",
+        )
+    )
+    max_job_chars: int = int(
+        os.getenv(
+            "TEU_VOICE_MAX_JOB_CHARS",
+            "220" if _IS_SERVERLESS else "2000",
+        )
+    )
+    max_upload_bytes: int = (
+        3 * 1024 * 1024 if _IS_SERVERLESS else 20 * 1024 * 1024
+    )
     @property
     def lan_enabled(self) -> bool:
         return is_private_lan_ipv4(self.host)
@@ -76,6 +92,12 @@ class Settings:
         # Disable progress bars in serverless to reduce log noise
         if _IS_SERVERLESS:
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            # Cap BLAS / ONNX threads so activation peaks stay under Hobby 2GB.
+            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+            os.environ.setdefault("MKL_NUM_THREADS", "1")
+            os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+            os.environ.setdefault("ORT_DISABLE_MEMORY_ARENA", "1")
 
 
 settings = Settings()

@@ -110,7 +110,7 @@ EMOTION_TAGS = (
     _tag("shout", "hét_lớn", "Hét lớn", "Cách thể hiện", "delivery", "▲", "Tăng lực, độ sáng và nhấn câu.", ("shout", "shouts", "shouting", "yelling", "yells", "hét", "het", "het lon"), speed=1.03, pitch_steps=0.25, gain_db=2.8, temperature_delta=0.04, punctuation="excited"),
     _tag("soft", "nhẹ_nhàng", "Nhẹ nhàng", "Cách thể hiện", "delivery", "≈", "Chậm nhẹ, nhỏ và mềm hơn.", ("soft", "softly", "gently", "nói nhỏ", "noi nho", "nhe nhang"), speed=0.92, pitch_steps=-0.25, gain_db=-3.0, temperature_delta=-0.04, punctuation="drawn"),
     _tag("rushed", "dồn_dập", "Dồn dập", "Cách thể hiện", "delivery", "»", "Tăng tốc rõ rệt và giảm khoảng ngắt.", ("rushed", "fast", "quickly", "nhanh", "nhanh chóng", "don dap"), speed=1.15, pitch_steps=0.2, punctuation="excited"),
-    _tag("slow", "chậm_rãi", "Chậm rãi", "Cách thể hiện", "delivery", "…", "Kéo chậm và tạo nhiều điểm nghỉ.", ("slow", "slowly", "chậm", "cham", "cham rai"), speed=0.84, pitch_steps=-0.2, punctuation="drawn"),
+    _tag("slow", "chậm_rãi", "Chậm rãi", "Cách thể hiện", "delivery", "…", "Kéo chậm nhịp đọc, giữ câu liền mạch.", ("slow", "slowly", "chậm", "cham", "cham rai"), speed=0.84, pitch_steps=-0.2, punctuation="drawn"),
     _tag("drawn_out", "kéo_dài", "Kéo dài", "Cách thể hiện", "delivery", "↝", "Kéo nhịp cuối câu để tăng biểu cảm.", ("drawn out", "elongated", "keo dai"), speed=0.88, punctuation="drawn"),
     _tag("hesitate", "ngập_ngừng", "Ngập ngừng", "Cách thể hiện", "delivery", "⋯", "Thêm nhịp lửng và khoảng do dự.", ("hesitate", "hesitates", "hesitant", "stammers", "stutter", "ngap ngung"), speed=0.91, punctuation="hesitant"),
     _tag("emphasis", "nhấn_mạnh", "Nhấn mạnh", "Cách thể hiện", "delivery", "●", "Tăng lực và làm rõ điểm rơi.", ("emphasis", "emphasize", "strongly", "nhan manh"), gain_db=1.2, punctuation="emphasis"),
@@ -233,11 +233,10 @@ def _clean_text(text: str) -> str:
 def _apply_punctuation(text: str, modes: set[str]) -> str:
     if not text:
         return text
-    if modes & {"drawn", "hesitant", "gasp", "dramatic", "comic"} and "…" not in text:
-        words = text.split()
-        if len(words) >= 7:
-            cut = max(3, len(words) - 3)
-            text = " ".join(words[:cut]) + "… " + " ".join(words[cut:])
+    # Never inject mid-sentence ellipsis. VieNeu treats "…" as a hard silence
+    # boundary, which breaks otherwise continuous clauses (e.g. @chậm_rãi
+    # turning "tìm góc yên tĩnh" into "tìm… góc yên tĩnh"). Pace comes from
+    # tag speed multipliers and the global speed slider instead.
     if modes & {"bright", "excited", "surprised", "emphasis"}:
         text = re.sub(r"[.]$", "!", text)
         if text[-1] not in "!?…":

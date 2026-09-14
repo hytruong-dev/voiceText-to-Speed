@@ -114,8 +114,8 @@
             <label class="drop-zone" for="reference-file">
               <input id="reference-file" type="file" accept="audio/wav,.wav" />
               <span class="drop-icon">＋</span>
-              <strong id="file-label">Chọn mẫu WAV 3–8 giây</strong>
-              <small id="upload-hint">Giọng rõ, một người nói, không nhạc nền · đang tải giới hạn…</small>
+              <strong id="file-label">Chọn mẫu WAV 3–60 giây</strong>
+              <small id="upload-hint">Hệ thống tự chọn cửa sổ 6–8 giây sạch nhất · mono/stereo PCM đều được</small>
             </label>
           </div>
 
@@ -128,11 +128,11 @@
               <button id="microphone-button" class="button secondary" type="button">Bắt đầu thu</button>
             </div>
             <audio id="microphone-player" controls preload="metadata" aria-label="Nghe lại mẫu mic vừa thu" hidden></audio>
-            <p class="mic-note">Mẫu này được gửi trực tiếp vào lượt clone hiện tại rồi tự xóa. Nếu báo quá âm lượng, hãy hạ gain mic trước khi thu lại.</p>
+            <p class="mic-note">Thu 7–8 giây: đọc 1–2 câu tự nhiên như đang kể chuyện (có nhấn nhá, không đọc đều đều). Gần mic, ít ồn. Xóa mẫu cũ rồi thu lại sau mỗi lần cải tiến. Khi clone: để tốc độ ~1.0×, ưu tiên tag gốc @cười / @thở_dài / @hắng_giọng; tắt “chuyển phong cách”.</p>
           </div>
 
           <div id="builtin-source" class="voice-source">
-            <label class="select-label" for="builtin-voice">Giọng tiếng Việt dựng sẵn</label>
+            <label class="select-label" for="builtin-voice">Giọng dựng sẵn (ưu tiên miền Nam / Sài Gòn)</label>
             <select id="builtin-voice"></select>
           </div>
 
@@ -218,6 +218,6 @@
       <span>Made for Vietnamese timing ✦</span>
     </footer>
 
-    <script src="/static/app.js?v=identity-1" defer></script>
+    <script src="/static/app.js?v=clone-identity-3" defer></script>
   </body>
 </html>

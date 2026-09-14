@@ -46,6 +46,7 @@ const elements = {
 };
 
 const suppliedAccessKey = new URLSearchParams(window.location.search).get("access_key") || "";
+const MIC_STORAGE_KEY = "teu-voice-microphone-reference-v1";
 
 const state = {
   config: null,
@@ -68,6 +69,73 @@ const state = {
   microphoneUrl: null,
   accessKey: suppliedAccessKey,
 };
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function persistMicrophoneSample(blob, duration) {
+  try {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    localStorage.setItem(
+      MIC_STORAGE_KEY,
+      JSON.stringify({
+        base64: bytesToBase64(bytes),
+        duration,
+        fileName: "microphone-reference.wav",
+        savedAt: Date.now(),
+      }),
+    );
+  } catch (_) {
+    // Quota or private mode — cloning still works for this session.
+  }
+}
+
+function clearPersistedMicrophoneSample() {
+  try {
+    localStorage.removeItem(MIC_STORAGE_KEY);
+  } catch (_) {
+    // Ignore storage failures.
+  }
+}
+
+function restorePersistedMicrophoneSample() {
+  try {
+    const raw = localStorage.getItem(MIC_STORAGE_KEY);
+    if (!raw) return false;
+    const payload = JSON.parse(raw);
+    if (!payload?.base64 || typeof payload.duration !== "number") {
+      clearPersistedMicrophoneSample();
+      return false;
+    }
+    const bytes = base64ToBytes(payload.base64);
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    state.microphoneFile = new File([blob], payload.fileName || "microphone-reference.wav", {
+      type: "audio/wav",
+    });
+    if (state.microphoneUrl) URL.revokeObjectURL(state.microphoneUrl);
+    state.microphoneUrl = URL.createObjectURL(blob);
+    elements.microphonePlayer.src = state.microphoneUrl;
+    elements.microphonePlayer.hidden = false;
+    elements.microphoneStatus.textContent = `Đã khôi phục mẫu mic ${Number(payload.duration).toFixed(1)} giây · sẵn sàng clone lại mà không cần thu mới.`;
+    return true;
+  } catch (_) {
+    clearPersistedMicrophoneSample();
+    return false;
+  }
+}
 
 function showError(message) {
   elements.formError.textContent = message;
@@ -109,7 +177,16 @@ async function jsonRequest(url, options = {}) {
     // The fallback below is clearer than a JSON parse error.
   }
   if (!response.ok) {
-    const error = new Error(formatApiDetail(payload.detail, `Yêu cầu thất bại (${response.status}).`));
+    let message = formatApiDetail(payload.detail, "");
+    if (!message) {
+      if (response.status === 500 || response.status === 502 || response.status === 504) {
+        message =
+          "Máy chủ cloud hết bộ nhớ hoặc bị ngắt giữa chừng. Hãy rút ngắn nội dung (dưới 250 ký tự), dùng giọng dựng sẵn Adam, tắt mic/clone rồi thử lại.";
+      } else {
+        message = `Yêu cầu thất bại (${response.status}).`;
+      }
+    }
+    const error = new Error(message);
     error.status = response.status;
     throw error;
   }
@@ -132,9 +209,25 @@ function foldSearch(value) {
     .replace(/^_+|_+$/g, "");
 }
 
+function effectiveMaxTextChars() {
+  return state.config?.limits?.max_text_chars || 2000;
+}
+
+function effectiveJobChunkChars() {
+  const limits = state.config?.limits || {};
+  if (state.source === "builtin") {
+    return limits.max_job_chars || limits.max_text_chars || 2000;
+  }
+  return limits.max_clone_text_chars || limits.max_job_chars || 120;
+}
+
 function updateCharCount() {
-  const max = state.config?.limits?.max_text_chars || 2000;
-  elements.charCount.textContent = `${elements.script.value.length.toLocaleString("vi-VN")} / ${max.toLocaleString("vi-VN")}`;
+  const max = effectiveMaxTextChars();
+  const secondsHint = Math.max(
+    1,
+    Math.round((elements.script.value.length / 100) * (state.config?.limits?.approx_seconds_per_100_chars || 6)),
+  );
+  elements.charCount.textContent = `${elements.script.value.length.toLocaleString("vi-VN")} / ${max.toLocaleString("vi-VN")} · ~${secondsHint}s`;
 }
 
 function formatSpeed(value) {
@@ -338,6 +431,15 @@ function updateSource(source, { resetConsent = true } = {}) {
   elements.denoiseRow.hidden = !isClone;
   elements.denoise.checked = false;
   if (resetConsent && changed) elements.consent.checked = false;
+  if (isClone) {
+    // Speed DSP warps clone timbre; keep near natural reading rate.
+    elements.speed.value = "1";
+    updateSpeedLabel();
+  }
+  if (state.config?.limits) {
+    elements.script.maxLength = effectiveMaxTextChars();
+  }
+  updateCharCount();
 }
 
 function encodeMonoWav(samples, sampleRate) {
@@ -366,6 +468,71 @@ function encodeMonoWav(samples, sampleRate) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+function trimAndNormalizeCloneSamples(samples, sampleRate) {
+  const threshold = 0.01;
+  let start = 0;
+  let end = samples.length - 1;
+  while (start < samples.length && Math.abs(samples[start]) <= threshold) start += 1;
+  while (end > start && Math.abs(samples[end]) <= threshold) end -= 1;
+  const guard = Math.floor(sampleRate * 0.08);
+  start = Math.max(0, start - guard);
+  end = Math.min(samples.length - 1, end + guard);
+  let trimmed = samples.subarray(start, end + 1);
+
+  const preferredSeconds = 7.5;
+  const preferredSamples = Math.floor(sampleRate * preferredSeconds);
+  if (trimmed.length > preferredSamples) {
+    const frame = Math.max(1, Math.floor(sampleRate * 0.02));
+    const hop = frame * 2;
+    let bestStart = 0;
+    let bestScore = -1;
+    for (let offset = 0; offset + preferredSamples <= trimmed.length; offset += hop) {
+      let speech = 0;
+      let energy = 0;
+      for (let index = offset; index < offset + preferredSamples; index += frame) {
+        const sample = trimmed[index];
+        const abs = Math.abs(sample);
+        if (abs > threshold) speech += 1;
+        energy += sample * sample;
+      }
+      const frames = Math.ceil(preferredSamples / frame);
+      const score = (speech / frames) * Math.sqrt(energy / frames);
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = offset;
+      }
+    }
+    trimmed = trimmed.subarray(bestStart, bestStart + preferredSamples);
+  }
+
+  let peak = 0;
+  for (let index = 0; index < trimmed.length; index += 1) {
+    peak = Math.max(peak, Math.abs(trimmed[index]));
+  }
+  if (peak < 0.02) {
+    return { error: "Mẫu quá nhỏ; hãy thu gần mic hơn rồi thử lại." };
+  }
+  if (peak >= 0.985) {
+    return { error: "Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng." };
+  }
+
+  // Keep natural timbre — no EQ. Only gentle peak match for enrollment.
+  const targetPeak = 10 ** (-3.0 / 20);
+  const gain = targetPeak / peak;
+  const normalized = new Float32Array(trimmed.length);
+  for (let index = 0; index < trimmed.length; index += 1) {
+    normalized[index] = trimmed[index] * gain;
+  }
+
+  const fade = Math.min(Math.floor(sampleRate * 0.004), Math.floor(normalized.length / 2));
+  for (let index = 0; index < fade; index += 1) {
+    const ramp = index / fade;
+    normalized[index] *= ramp;
+    normalized[normalized.length - 1 - index] *= ramp;
+  }
+  return { samples: normalized, peak, duration: normalized.length / sampleRate };
+}
+
 function discardMicrophoneCapture() {
   const capture = state.microphoneCapture;
   if (capture) {
@@ -380,7 +547,7 @@ function discardMicrophoneCapture() {
   elements.microphoneButton.textContent = "Bắt đầu thu";
 }
 
-function resetMicrophoneSample(message) {
+function clearMicrophoneUi(message) {
   state.microphoneFile = null;
   if (state.microphoneUrl) URL.revokeObjectURL(state.microphoneUrl);
   state.microphoneUrl = null;
@@ -390,6 +557,11 @@ function resetMicrophoneSample(message) {
   elements.microphoneStatus.textContent = message;
 }
 
+function resetMicrophoneSample(message, { clearStorage = true } = {}) {
+  clearMicrophoneUi(message);
+  if (clearStorage) clearPersistedMicrophoneSample();
+}
+
 function finishMicrophoneCapture() {
   const capture = state.microphoneCapture;
   if (!capture) return;
@@ -397,35 +569,28 @@ function finishMicrophoneCapture() {
   const sampleCount = capture.chunks.reduce((total, chunk) => total + chunk.length, 0);
   const collectedSamples = new Float32Array(sampleCount);
   let offset = 0;
-  let peak = 0;
   for (const chunk of capture.chunks) {
     collectedSamples.set(chunk, offset);
     offset += chunk.length;
-    for (const sample of chunk) peak = Math.max(peak, Math.abs(sample));
   }
-  // Leave a safety margin below the backend's 8-second clone limit: a browser
-  // callback can arrive a fraction of a second after the visible timer.
-  const maximumSamples = Math.floor(capture.sampleRate * 7.8);
-  const samples = collectedSamples.length > maximumSamples
-    ? collectedSamples.slice(0, maximumSamples)
-    : collectedSamples;
-  const duration = samples.length / capture.sampleRate;
-  if (duration < 5.8) {
-    resetMicrophoneSample("Mẫu còn ngắn; hãy thu liền mạch ít nhất 6 giây để clone giữ màu giọng tốt hơn.");
+  const prepared = trimAndNormalizeCloneSamples(collectedSamples, capture.sampleRate);
+  if (prepared.error) {
+    resetMicrophoneSample(prepared.error);
     return;
   }
-  if (peak >= 0.985) {
-    resetMicrophoneSample("Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng.");
+  if (prepared.duration < 5.8) {
+    resetMicrophoneSample("Phần tiếng nói thực còn ngắn; hãy thu liền mạch ít nhất 6 giây để clone giữ màu giọng tốt hơn.");
     return;
   }
-  const blob = encodeMonoWav(samples, capture.sampleRate);
+  const blob = encodeMonoWav(prepared.samples, capture.sampleRate);
   state.microphoneFile = new File([blob], "microphone-reference.wav", { type: "audio/wav" });
   if (state.microphoneUrl) URL.revokeObjectURL(state.microphoneUrl);
   state.microphoneUrl = URL.createObjectURL(blob);
   elements.microphonePlayer.src = state.microphoneUrl;
   elements.microphonePlayer.hidden = false;
-  elements.microphoneStatus.textContent = `Đã thu ${duration.toFixed(1)} giây · không clipping · sẵn sàng clone đúng màu mic này.`;
+  elements.microphoneStatus.textContent = `Đã thu ${prepared.duration.toFixed(1)} giây · đã chuẩn hóa mức âm · sẵn sàng clone đúng màu mic này.`;
   elements.consent.checked = false;
+  void persistMicrophoneSample(blob, prepared.duration);
 }
 
 async function toggleMicrophoneCapture() {
@@ -439,16 +604,18 @@ async function toggleMicrophoneCapture() {
     return;
   }
   try {
-    resetMicrophoneSample("Đang xin quyền dùng micro…");
+    clearMicrophoneUi("Đang xin quyền dùng micro…");
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: { ideal: 1 },
+        sampleRate: { ideal: 48000 },
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
       },
     });
-    const context = new AudioContext();
+    clearPersistedMicrophoneSample();
+    const context = new AudioContext({ sampleRate: 48000 });
     await context.resume();
     const source = context.createMediaStreamSource(stream);
     const processor = context.createScriptProcessor(4096, 1, 1);
@@ -479,7 +646,9 @@ async function toggleMicrophoneCapture() {
     state.microphoneCapture = capture;
     elements.microphoneButton.textContent = "Dừng & dùng mẫu";
   } catch (error) {
-    resetMicrophoneSample("Không thể dùng micro.");
+    if (!restorePersistedMicrophoneSample()) {
+      clearMicrophoneUi("Không thể dùng micro.");
+    }
     showError(error.name === "NotAllowedError" ? "Bạn cần cho phép trình duyệt dùng micro để thu mẫu giọng." : error.message);
   }
 }
@@ -498,9 +667,90 @@ function restoreStableResult() {
 function validateText() {
   const text = elements.script.value.trim();
   if (!text) throw new Error("Vui lòng nhập nội dung cần đọc.");
-  const max = state.config?.limits?.max_text_chars || 2000;
-  if (text.length > max) throw new Error(`Nội dung tối đa ${max.toLocaleString("vi-VN")} ký tự mỗi lượt.`);
+  const max = effectiveMaxTextChars();
+  if (text.length > max) {
+    throw new Error(`Nội dung tối đa ${max.toLocaleString("vi-VN")} ký tự mỗi lượt (~60–90 giây).`);
+  }
   return text;
+}
+
+function splitScriptForJobs(text, maxChars) {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return [];
+  if (cleaned.length <= maxChars) return [cleaned];
+
+  const parts = [];
+  let remaining = cleaned;
+  while (remaining) {
+    if (remaining.length <= maxChars) {
+      parts.push(remaining);
+      break;
+    }
+    const window = remaining.slice(0, maxChars + 1);
+    let splitAt = -1;
+    for (const marker of [". ", "! ", "? ", "; ", ", ", " "]) {
+      const index = window.lastIndexOf(marker);
+      if (index >= Math.max(24, Math.floor(maxChars / 3))) {
+        splitAt = index + marker.length;
+        break;
+      }
+    }
+    const atIndex = window.lastIndexOf("@");
+    if (atIndex > 0 && (splitAt < 0 || atIndex < splitAt) && atIndex >= Math.floor(maxChars * 0.5)) {
+      splitAt = atIndex;
+    }
+    if (splitAt <= 0) splitAt = maxChars;
+    const chunk = remaining.slice(0, splitAt).trim();
+    if (chunk) parts.push(chunk);
+    remaining = remaining.slice(splitAt).trim();
+  }
+  return parts;
+}
+
+async function waitForJobDone(jobId) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    if (!state.jobInFlight) throw new Error("Đã hủy lượt tạo giọng.");
+    const job = await jsonRequest(`/api/jobs/${jobId}`);
+    if (job.status === "done") return job;
+    if (job.status === "error" || job.status === "cancelled") {
+      throw new Error(job.error || "Engine không thể tạo giọng.");
+    }
+    elements.jobStage.textContent = job.stage || "Đang tổng hợp";
+    await new Promise((resolve) => {
+      state.polling = setTimeout(resolve, 900);
+    });
+  }
+  throw new Error("Hết thời gian chờ khi tạo giọng. Hãy thử lại.");
+}
+
+async function fetchJobAudioBuffer(job, audioContext) {
+  const response = await fetch(authorizedUrl(job.audio_url), {
+    headers: state.accessKey ? { "X-Teu-Access-Key": state.accessKey } : {},
+  });
+  if (!response.ok) throw new Error("Không tải được tệp âm thanh vừa tạo.");
+  const data = await response.arrayBuffer();
+  return audioContext.decodeAudioData(data.slice(0));
+}
+
+function concatenateAudioBuffers(audioContext, buffers, gapSeconds = 0.06) {
+  const sampleRate = buffers[0]?.sampleRate || 48000;
+  const gapSamples = Math.max(0, Math.floor(sampleRate * gapSeconds));
+  let total = 0;
+  for (const buffer of buffers) total += buffer.length + gapSamples;
+  total = Math.max(1, total - gapSamples);
+  const output = audioContext.createBuffer(1, total, sampleRate);
+  const channel = output.getChannelData(0);
+  let offset = 0;
+  for (let index = 0; index < buffers.length; index += 1) {
+    channel.set(buffers[index].getChannelData(0), offset);
+    offset += buffers[index].length;
+    if (index < buffers.length - 1) offset += gapSamples;
+  }
+  return output;
+}
+
+function encodeAudioBufferToWav(buffer) {
+  return encodeMonoWav(buffer.getChannelData(0), buffer.sampleRate);
 }
 
 function renderPreviewTags(ids = []) {
@@ -554,7 +804,7 @@ async function loadConfig() {
     state.config = await jsonRequest("/api/config");
     state.configLoaded = true;
     renderTagCatalog(state.config.emotion_tags);
-    elements.script.maxLength = state.config.limits.max_text_chars;
+    elements.script.maxLength = effectiveMaxTextChars();
     elements.speed.min = state.config.limits.speed_min;
     elements.speed.max = state.config.limits.speed_max;
     elements.speed.value = state.config.limits.speed_default;
@@ -562,17 +812,22 @@ async function loadConfig() {
     elements.styleTransfer.checked = Boolean(styleConfig.available && styleConfig.default);
     elements.styleTransfer.disabled = !styleConfig.available;
     elements.styleTransferRow.hidden = !styleConfig.available;
-    elements.uploadHint.textContent = `Giọng rõ, một người nói, không nhạc nền · tối đa ${state.config.limits.max_upload_mb} MB`;
+    elements.uploadHint.textContent = `Tự chọn cửa sổ 6–8 giây sạch nhất · tối đa ${state.config.limits.max_upload_mb} MB`;
     updateCharCount();
     updateSpeedLabel();
 
     elements.builtinVoice.replaceChildren();
-    for (const voice of state.config.builtin_voices) {
+    const voices = state.config.builtin_voices || [];
+    for (const voice of voices) {
       const option = document.createElement("option");
-      option.value = voice;
-      option.textContent = voice;
+      const id = typeof voice === "string" ? voice : voice.id;
+      const label = typeof voice === "string" ? voice : (voice.label || voice.id);
+      option.value = id;
+      option.textContent = label;
       elements.builtinVoice.append(option);
     }
+    const preferredBuiltin = state.config.voice_region?.default_builtin;
+    if (preferredBuiltin) elements.builtinVoice.value = preferredBuiltin;
 
     if (state.config.reference.available) {
       const ref = state.config.reference;
@@ -627,14 +882,17 @@ async function previewPerformance() {
   }
 }
 
-function buildJobForm() {
+function buildJobForm(text = elements.script.value) {
   const form = new FormData();
-  form.append("text", elements.script.value);
-  form.append("speed", elements.speed.value);
+  form.append("text", text);
+  const isClone = state.source !== "builtin";
+  // Clone timbre is ruined by rate-change DSP; keep near 1.0×.
+  form.append("speed", isClone ? "1" : elements.speed.value);
   form.append("reference_mode", state.source === "microphone" ? "upload" : state.source);
-  form.append("builtin_voice", elements.builtinVoice.value || "Adam");
-  form.append("denoise", String(elements.denoise.checked));
-  form.append("style_transfer", String(elements.styleTransfer.checked));
+  form.append("builtin_voice", elements.builtinVoice.value || state.config?.voice_region?.default_builtin || "Adam");
+  form.append("denoise", "false");
+  // Keep style transfer off for clone identity (especially on cloud).
+  form.append("style_transfer", isClone ? "false" : String(elements.styleTransfer.checked));
   form.append("consent", String(elements.consent.checked));
   if (state.source === "upload" && elements.referenceFile.files[0]) {
     form.append("reference_file", elements.referenceFile.files[0]);
@@ -662,30 +920,24 @@ function titleForTags(ids = []) {
   return names.length ? names.join(" + ") : "Bản tự nhiên";
 }
 
-function finishActiveJob(job) {
+function finishActiveJob(job, { audioBlob = null, durationSeconds = null } = {}) {
   if (state.polling) clearTimeout(state.polling);
   state.polling = null;
-
-  // Serverless mode: backend embeds audio as base64 in the response.
-  // Use a Blob URL to avoid a separate /audio/ fetch that would hit a
-  // different stateless instance with an empty /tmp.
-  if (job.audio_b64) {
-    const bytes = Uint8Array.from(atob(job.audio_b64), (c) => c.charCodeAt(0));
-    const blob = new Blob([bytes], { type: "audio/wav" });
-    const blobUrl = URL.createObjectURL(blob);
-    elements.resultPlayer.src = blobUrl;
-    elements.downloadLink.href = blobUrl;
-    elements.downloadLink.download = job.output_name || "teu-voice.wav";
+  if (audioBlob) {
+    const objectUrl = URL.createObjectURL(audioBlob);
+    elements.resultPlayer.src = objectUrl;
+    elements.downloadLink.href = objectUrl;
+    elements.downloadLink.download = `teu-voice-${Date.now()}.wav`;
   } else {
     const audioUrl = new URL(authorizedUrl(job.audio_url), window.location.origin);
     audioUrl.searchParams.set("v", String(Date.now()));
     elements.resultPlayer.src = `${audioUrl.pathname}${audioUrl.search}`;
     elements.downloadLink.href = authorizedUrl(job.audio_url);
   }
-
   elements.trackTitle.textContent = titleForTags(job.emotion_tags);
   const styleText = job.effects?.style_transfer ? " · mẫu phong cách" : "";
-  elements.trackMeta.textContent = `${job.duration_seconds.toFixed(2)} giây · ${formatSpeed(job.speed)}×${styleText} · WAV 48 kHz · local`;
+  const duration = Number(durationSeconds ?? job.duration_seconds ?? 0);
+  elements.trackMeta.textContent = `${duration.toFixed(2)} giây · ${formatSpeed(job.speed)}×${styleText} · WAV 48 kHz`;
   state.completedPreview = job;
   state.hasCompletedResult = true;
   state.pendingJob = null;
@@ -698,8 +950,9 @@ function finishActiveJob(job) {
 async function createJob() {
   if (state.jobInFlight) return;
   clearError();
+  let fullText;
   try {
-    validateText();
+    fullText = validateText();
   } catch (error) {
     showError(error.message);
     elements.script.focus();
@@ -725,11 +978,14 @@ async function createJob() {
     }
   }
 
-  state.pendingJob = { speed: Number(elements.speed.value) };
+  const chunks = splitScriptForJobs(fullText, effectiveJobChunkChars());
+  state.pendingJob = { speed: Number(elements.speed.value), chunks: chunks.length };
   state.jobInFlight = true;
   state.pollFailures = 0;
   elements.resultPanel.setAttribute("aria-busy", "true");
-  elements.jobStage.textContent = "Đang gửi kịch bản";
+  elements.jobStage.textContent = chunks.length > 1
+    ? `Đang tạo đoạn dài (${chunks.length} phần)…`
+    : "Đang gửi kịch bản";
   showResult("working");
   syncControls();
   if (window.matchMedia("(max-width: 900px)").matches) {
@@ -737,16 +993,46 @@ async function createJob() {
   }
 
   try {
-    const job = await jsonRequest("/api/jobs", { method: "POST", body: buildJobForm() });
-    state.pendingJob = { ...state.pendingJob, id: job.id };
-    // Serverless mode: synthesis runs synchronously, so the POST response
-    // already contains the final status. Skip polling in that case.
-    if (job.status === "done") {
-      finishActiveJob(job);
-    } else if (job.status === "error" || job.status === "cancelled") {
-      endActiveJobWithError(job.error || "Engine không thể tạo giọng.");
-    } else {
-      await pollJob(job.id);
+    if (chunks.length === 1) {
+      const job = await jsonRequest("/api/jobs", { method: "POST", body: buildJobForm(chunks[0]) });
+      state.pendingJob = { ...state.pendingJob, id: job.id };
+      if (job.status === "done") {
+        finishActiveJob(job);
+        return;
+      }
+      const done = await waitForJobDone(job.id);
+      finishActiveJob(done);
+      return;
+    }
+
+    const audioContext = new AudioContext({ sampleRate: 48000 });
+    const buffers = [];
+    let lastJob = null;
+    const allTags = [];
+    try {
+      for (let index = 0; index < chunks.length; index += 1) {
+        elements.jobStage.textContent = `Đang tạo phần ${index + 1}/${chunks.length}…`;
+        const job = await jsonRequest("/api/jobs", {
+          method: "POST",
+          body: buildJobForm(chunks[index]),
+        });
+        lastJob = job.status === "done" ? job : await waitForJobDone(job.id);
+        allTags.push(...(lastJob.emotion_tags || []));
+        buffers.push(await fetchJobAudioBuffer(lastJob, audioContext));
+      }
+      const merged = concatenateAudioBuffers(audioContext, buffers);
+      const blob = encodeAudioBufferToWav(merged);
+      finishActiveJob(
+        {
+          ...lastJob,
+          emotion_tags: [...new Set(allTags)],
+          duration_seconds: merged.duration,
+          speed: Number(elements.speed.value),
+        },
+        { audioBlob: blob, durationSeconds: merged.duration },
+      );
+    } finally {
+      audioContext.close();
     }
   } catch (error) {
     endActiveJobWithError(error.message);
@@ -798,7 +1084,7 @@ elements.script.addEventListener("blur", () => setTimeout(closeSuggestions, 120)
 elements.speed.addEventListener("input", updateSpeedLabel);
 elements.referenceFile.addEventListener("change", () => {
   const file = elements.referenceFile.files[0];
-  elements.fileLabel.textContent = file ? file.name : "Chọn mẫu WAV 3–8 giây";
+  elements.fileLabel.textContent = file ? file.name : "Chọn mẫu WAV 3–60 giây";
   elements.consent.checked = false;
 });
 elements.microphoneButton.addEventListener("click", toggleMicrophoneCapture);
@@ -819,6 +1105,11 @@ document.addEventListener("pointerdown", (event) => {
 
 updateCharCount();
 updateSpeedLabel();
-updateSource("provided", { resetConsent: false });
+const restoredMic = restorePersistedMicrophoneSample();
+updateSource(restoredMic ? "microphone" : "provided", { resetConsent: false });
+if (restoredMic) {
+  const microphoneRadio = document.querySelector('input[name="voice-source"][value="microphone"]');
+  if (microphoneRadio) microphoneRadio.checked = true;
+}
 syncControls();
 loadConfig();

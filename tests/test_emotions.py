@@ -111,6 +111,16 @@ def test_segment_effects_are_safely_bounded() -> None:
     assert 0.70 <= segment.temperature <= 0.95
 
 
+def test_slow_tag_keeps_clause_continuous_without_ellipsis_break() -> None:
+    plan = compile_emotion_script(
+        "@chậm_rãi Sáng cuối tuần, tạm gác lại những vội vã, mình ghé Katinat, tìm góc yên tĩnh."
+    )
+    assert "…" not in plan.engine_text
+    assert "tìm góc yên tĩnh" in plan.engine_text
+    assert plan.segments[0].speed_multiplier == 0.84
+    assert plan.segments[0].tag_ids == ("slow",)
+
+
 def test_catalog_has_unique_ids_mentions_and_support_metadata() -> None:
     catalog = tag_catalog()
     assert len(catalog) >= 40
