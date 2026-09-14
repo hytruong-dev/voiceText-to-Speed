@@ -82,6 +82,19 @@ def test_prepare_clone_reference_resamples_and_normalizes(tmp_path: Path) -> Non
     assert float(np.max(np.abs(audio))) == pytest.approx(10 ** (-3.0 / 20), rel=0.08)
 
 
+def test_prepare_clone_reference_accepts_hot_clipped_peak(tmp_path: Path) -> None:
+    source = tmp_path / "hot.wav"
+    destination = tmp_path / "prepared-hot.wav"
+    make_speech_wav(source, 5.0, sample_rate=48_000, amplitude=1.05)
+
+    info = prepare_clone_reference(source, destination)
+
+    assert destination.exists()
+    assert 3.0 <= info.duration_seconds <= 8.0
+    audio, _sr = sf.read(str(destination), dtype="float32")
+    assert float(np.max(np.abs(audio))) == pytest.approx(10 ** (-3.0 / 20), rel=0.08)
+
+
 def test_prepare_clone_reference_picks_dense_window_from_long_clip(tmp_path: Path) -> None:
     source = tmp_path / "long.wav"
     destination = tmp_path / "window.wav"

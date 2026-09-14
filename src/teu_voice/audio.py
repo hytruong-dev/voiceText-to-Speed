@@ -199,10 +199,11 @@ def prepare_clone_reference(source: Path, destination: Path) -> AudioInfo:
         raise AudioValidationError(
             "Mẫu giọng quá nhỏ. Hãy thu gần mic hơn hoặc tăng volume trước khi clone."
         )
+    # Hot / clipped uploads: attenuate to target peak instead of rejecting.
+    # Flat clipped tops remain, but the sample stays usable for enrollment.
     if peak >= 0.985:
-        raise AudioValidationError(
-            "Mẫu giọng bị clipping. Hãy hạ gain mic rồi thu lại để giữ đúng màu giọng."
-        )
+        wav = np.clip(wav, -1.0, 1.0)
+        peak = float(np.max(np.abs(wav))) or 1.0
 
     wav *= CLONE_TARGET_PEAK / peak
     # Do not EQ/tilt the reference — formants are the clone identity.
