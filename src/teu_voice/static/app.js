@@ -512,8 +512,13 @@ function trimAndNormalizeCloneSamples(samples, sampleRate) {
   if (peak < 0.02) {
     return { error: "Mẫu quá nhỏ; hãy thu gần mic hơn rồi thử lại." };
   }
+  // Hot / clipped mic takes: clamp then normalize instead of blocking.
   if (peak >= 0.985) {
-    return { error: "Mic đã bị quá âm lượng. Hãy hạ gain mic rồi thu lại để tránh méo màu giọng." };
+    for (let index = 0; index < trimmed.length; index += 1) {
+      const sample = trimmed[index];
+      trimmed[index] = sample > 1 ? 1 : sample < -1 ? -1 : sample;
+    }
+    peak = 1;
   }
 
   // Keep natural timbre — no EQ. Only gentle peak match for enrollment.
